@@ -25,6 +25,11 @@ const LS_GSHEET = "task-tracker-gsheet";
 const LS_CLIENT = "task-tracker-client-id";
 const LS_TOKEN = "task-tracker-token";
 const LS_LAST_SYNC = "task-tracker-last-sync";
+const LS_EXPANDED = "task-tracker-expanded";
+
+// A task is considered a child only if parentId is a non-empty string.
+// Empty strings or whitespace must be treated as top-level.
+const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
 
 // Merge local and remote data using per-item updatedAt timestamps.
@@ -432,7 +437,17 @@ export default function App() {
   const [editingTask, setEditingTask] = useState(null);
   const [editPreview, setEditPreview] = useState(false);
   const [activeId, setActiveId] = useState(null);
-  const [expandedIds, setExpandedIds] = useState(() => new Set());
+  const [expandedIds, setExpandedIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_EXPANDED);
+      if (raw) return new Set(JSON.parse(raw));
+    } catch {}
+    return new Set();
+  });
+  // Persist expansion state across reloads
+  useEffect(() => {
+    try { localStorage.setItem(LS_EXPANDED, JSON.stringify([...expandedIds])); } catch {}
+  }, [expandedIds]);
   const skipHashSync = useRef(false);
 
   const toggleExpand = useCallback((id) => {
@@ -890,7 +905,7 @@ export default function App() {
   const activeProject = data.projects.find((p) => p.id === activeProjectId);
   const projectTasks = data.tasks.filter((t) => t.projectId === activeProjectId);
   // Only top-level tasks appear on the kanban board
-  const topLevelProjectTasks = projectTasks.filter((t) => !t.parentId);
+  const topLevelProjectTasks = projectTasks.filter((t) => !hasParent(t));
   const tasksByColumn = {};
   COLUMNS.forEach((c) => {
     tasksByColumn[c.id] = topLevelProjectTasks
@@ -905,7 +920,7 @@ export default function App() {
   // Helper: direct children of a task, sorted by priority then order
   const getChildren = (tid) =>
     data.tasks
-      .filter((t) => t.parentId === tid)
+      .filter((t) => hasParent(t) && String(t.parentId).trim() === tid)
       .sort((a, b) => {
         const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
         const pb = PRIORITY_RANK[b.priority || "none"] ?? 2;
@@ -915,10 +930,11 @@ export default function App() {
   // Precompute direct-child counts for each task (for card indicators)
   const childStats = {};
   data.tasks.forEach((t) => {
-    if (t.parentId) {
-      if (!childStats[t.parentId]) childStats[t.parentId] = { count: 0, done: 0 };
-      childStats[t.parentId].count += 1;
-      if (t.column === "done") childStats[t.parentId].done += 1;
+    if (hasParent(t)) {
+      const pid = String(t.parentId).trim();
+      if (!childStats[pid]) childStats[pid] = { count: 0, done: 0 };
+      childStats[pid].count += 1;
+      if (t.column === "done") childStats[pid].done += 1;
     }
   });
 
@@ -1185,26 +1201,40 @@ export default function App() {
 
         /* Nested child cards in column */
         .task-card-child {
-          margin-left: 18px;
+          margin-left: 26px;
           position: relative;
+          background: #13151c;
+          font-size: 13px;
         }
+        .task-card-child .task-title { font-size: 13px; }
         .task-card-child::before {
           content: "";
           position: absolute;
-          left: -11px;
+          left: -16px;
           top: 0;
           bottom: 50%;
-          width: 8px;
-          border-left: 1px solid #2a2d38;
-          border-bottom: 1px solid #2a2d38;
-          border-bottom-left-radius: 6px;
+          width: 13px;
+          border-left: 2px solid #3b82f6;
+          border-bottom: 2px solid #3b82f6;
+          border-bottom-left-radius: 8px;
+          pointer-events: none;
+          opacity: 0.35;
+        }
+        .task-card-child::after {
+          content: "";
+          position: absolute;
+          left: -16px;
+          top: 50%;
+          bottom: -6px;
+          width: 2px;
+          background: #3b82f6;
+          opacity: 0.15;
           pointer-events: none;
         }
-        .task-card-child[data-depth="2"] { margin-left: 36px; }
-        .task-card-child[data-depth="2"]::before { left: -11px; }
-        .task-card-child[data-depth="3"] { margin-left: 54px; }
-        .task-card-child[data-depth="4"] { margin-left: 72px; }
-        .task-card-child[data-depth="5"] { margin-left: 90px; }
+        .task-card-child[data-depth="2"] { margin-left: 52px; }
+        .task-card-child[data-depth="3"] { margin-left: 78px; }
+        .task-card-child[data-depth="4"] { margin-left: 104px; }
+        .task-card-child[data-depth="5"] { margin-left: 130px; }
 
         /* Subtasks in view modal */
         .subtasks-details {
