@@ -21,7 +21,22 @@ import { CSS } from "@dnd-kit/utilities";
 const LS_KEY = "task-tracker-v1";
 const LS_GSHEET = "task-tracker-gsheet";
 const LS_CLIENT = "task-tracker-client-id";
+const LS_TOKEN = "task-tracker-token";
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+
+// Load a valid (non-expired) stored token, if any
+const loadStoredToken = () => {
+  try {
+    const raw = localStorage.getItem(LS_TOKEN);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.token || !parsed?.expiresAt) return null;
+    if (Date.now() >= parsed.expiresAt - 30000) return null; // 30s buffer
+    return parsed;
+  } catch {
+    return null;
+  }
+};
 
 const COLUMNS = [
   { id: "todo", label: "To Do", color: "#6b7280" },
@@ -206,7 +221,7 @@ export default function App() {
 
   // Google sync state
   const [syncStatus, setSyncStatus] = useState("idle");
-  const [token, setToken] = useState(null);
+  const [token, setToken] = useState(() => loadStoredToken()?.token || null);
   const [clientId, setClientId] = useState(() => localStorage.getItem(LS_CLIENT) || "");
   const [sheetId, setSheetId] = useState(() => localStorage.getItem(LS_GSHEET) || "");
   const [showSetup, setShowSetup] = useState(false);
@@ -214,6 +229,7 @@ export default function App() {
   const tokenClient = useRef(null);
   const dataRef = useRef(data);
   dataRef.current = data;
+  const refreshTimer = useRef(null);
 
   // Load data from localStorage
   useEffect(() => {
@@ -259,28 +275,63 @@ export default function App() {
   );
 
   // ── Google Auth ──────────────────────────────────────────────────────────
+  const initTokenClient = useCallback(() => {
+    if (!window.google || !clientId) return;
+    tokenClient.current = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: SCOPES,
+      callback: (resp) => {
+        if (resp.access_token) {
+          const expiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+          setToken(resp.access_token);
+          try {
+            localStorage.setItem(LS_TOKEN, JSON.stringify({ token: resp.access_token, expiresAt }));
+          } catch {}
+        }
+      },
+      error_callback: () => {
+        // Silent refresh failed or user dismissed — leave token null
+      },
+    });
+    // Try silent refresh if user previously consented but stored token is gone/expired
+    if (!loadStoredToken() && localStorage.getItem(LS_TOKEN)) {
+      try { tokenClient.current.requestAccessToken({ prompt: "" }); } catch {}
+    }
+  }, [clientId]);
+
   const loadGsi = useCallback(() => {
-    if (gsiLoaded.current || !clientId) return;
+    if (!clientId) return;
+    if (gsiLoaded.current) { initTokenClient(); return; }
     const s = document.createElement("script");
     s.src = "https://accounts.google.com/gsi/client";
     s.onload = () => {
       gsiLoaded.current = true;
-      tokenClient.current = window.google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: SCOPES,
-        callback: (resp) => {
-          if (resp.access_token) {
-            setToken(resp.access_token);
-          }
-        },
-      });
+      initTokenClient();
     };
     document.head.appendChild(s);
-  }, [clientId]);
+  }, [clientId, initTokenClient]);
 
   useEffect(() => { loadGsi(); }, [loadGsi]);
 
+  // Auto-refresh token ~1 minute before expiry
+  useEffect(() => {
+    if (!token) return;
+    const stored = loadStoredToken();
+    if (!stored) return;
+    const msUntilRefresh = Math.max(0, stored.expiresAt - Date.now() - 60000);
+    refreshTimer.current = setTimeout(() => {
+      if (tokenClient.current) {
+        try { tokenClient.current.requestAccessToken({ prompt: "" }); } catch {}
+      }
+    }, msUntilRefresh);
+    return () => clearTimeout(refreshTimer.current);
+  }, [token]);
+
   const login = () => tokenClient.current?.requestAccessToken();
+  const logout = () => {
+    setToken(null);
+    try { localStorage.removeItem(LS_TOKEN); } catch {}
+  };
 
   const syncFromSheets = async () => {
     if (!token || !sheetId) return;
@@ -800,6 +851,9 @@ export default function App() {
             ) : clientId ? (
               <button className="btn-sm" onClick={login}>Login</button>
             ) : null}
+            {showSetup && token && (
+              <button className="btn-sm" onClick={logout}>Logout</button>
+            )}
             <button className="btn-sm" onClick={() => setShowSetup(!showSetup)}>&#9881;</button>
           </div>
         </div>
