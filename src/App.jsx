@@ -1106,10 +1106,26 @@ export default function App() {
                 COLUMNS.forEach((c) => {
                   counts[c.id] = pTasks.filter((t) => t.column === c.id).length;
                 });
+                const activeTasks = pTasks.filter((t) => t.column !== "done" && t.column !== "cancelled");
+                const prioCounts = {
+                  urgent: activeTasks.filter((t) => t.priority === "urgent").length,
+                  soon: activeTasks.filter((t) => t.priority === "soon").length,
+                };
                 return (
                   <div key={p.id} className="project-card" onClick={() => openProject(p.id)}>
                     <h3>{p.name}</h3>
                     <div className="meta">{pTasks.length} task{pTasks.length !== 1 ? "s" : ""}</div>
+                    {(prioCounts.urgent > 0 || prioCounts.soon > 0) && (
+                      <div className="meta-cols">
+                        {PRIORITIES.map((pr) =>
+                          pr.id !== "none" && prioCounts[pr.id] > 0 ? (
+                            <span key={pr.id} className="meta-col" style={{ color: pr.color }}>
+                              {pr.label} {prioCounts[pr.id]}
+                            </span>
+                          ) : null
+                        )}
+                      </div>
+                    )}
                     {pTasks.length > 0 && (
                       <div className="meta-cols">
                         {COLUMNS.map((c) =>
