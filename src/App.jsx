@@ -1685,11 +1685,13 @@ export default function App() {
             <div className="projects-grid">
               {data.projects.map((p) => {
                 const pTasks = data.tasks.filter((t) => t.projectId === p.id);
-                const counts = {};
-                COLUMNS.forEach((c) => {
-                  counts[c.id] = pTasks.filter((t) => t.column === c.id).length;
-                });
                 const activeTasks = pTasks.filter((t) => t.column !== "done" && t.column !== "cancelled");
+                const activeCounts = {};
+                COLUMNS.forEach((c) => {
+                  if (c.id !== "done" && c.id !== "cancelled") {
+                    activeCounts[c.id] = activeTasks.filter((t) => t.column === c.id).length;
+                  }
+                });
                 const prioCounts = {
                   urgent: activeTasks.filter((t) => t.priority === "urgent").length,
                   soon: activeTasks.filter((t) => t.priority === "soon").length,
@@ -1697,7 +1699,7 @@ export default function App() {
                 return (
                   <div key={p.id} className="project-card" onClick={() => openProject(p.id)}>
                     <h3>{p.name}</h3>
-                    <div className="meta">{pTasks.length} task{pTasks.length !== 1 ? "s" : ""}</div>
+                    <div className="meta">{activeTasks.length} task{activeTasks.length !== 1 ? "s" : ""}</div>
                     {(prioCounts.urgent > 0 || prioCounts.soon > 0) && (
                       <div className="meta-cols">
                         {PRIORITIES.map((pr) =>
@@ -1709,12 +1711,12 @@ export default function App() {
                         )}
                       </div>
                     )}
-                    {pTasks.length > 0 && (
+                    {activeTasks.length > 0 && (
                       <div className="meta-cols">
-                        {COLUMNS.map((c) =>
-                          counts[c.id] > 0 ? (
+                        {COLUMNS.filter((c) => c.id !== "done" && c.id !== "cancelled").map((c) =>
+                          activeCounts[c.id] > 0 ? (
                             <span key={c.id} className="meta-col" style={{ color: c.color }}>
-                              {c.label} {counts[c.id]}
+                              {c.label} {activeCounts[c.id]}
                             </span>
                           ) : null
                         )}
