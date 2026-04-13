@@ -24,7 +24,51 @@ const LS_KEY = "task-tracker-v1";
 const LS_GSHEET = "task-tracker-gsheet";
 const LS_CLIENT = "task-tracker-client-id";
 const LS_TOKEN = "task-tracker-token";
+const LS_LAST_SYNC = "task-tracker-last-sync";
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+
+// Merge local and remote data using per-item updatedAt timestamps.
+// The lastSyncedAt cutoff distinguishes "newly added" from "deleted" for items
+// that appear in only one side — avoiding lost deletes and lost offline creates.
+const mergeData = (local, remote, lastSyncedAt = 0) => {
+  const remoteEmpty =
+    (!remote.projects || remote.projects.length === 0) &&
+    (!remote.tasks || remote.tasks.length === 0);
+  if (remoteEmpty) return local; // fresh/empty sheet: safer to keep local as-is
+
+  const lastSyncIso = new Date(lastSyncedAt).toISOString();
+
+  const mergeItems = (localItems, remoteItems) => {
+    const localById = new Map((localItems || []).map((i) => [i.id, i]));
+    const remoteById = new Map((remoteItems || []).map((i) => [i.id, i]));
+    const allIds = new Set([...localById.keys(), ...remoteById.keys()]);
+    const merged = [];
+    for (const id of allIds) {
+      const l = localById.get(id);
+      const r = remoteById.get(id);
+      if (l && r) {
+        // Both present → take whichever has newer updatedAt (ties prefer local)
+        const lTime = l.updatedAt || "";
+        const rTime = r.updatedAt || "";
+        merged.push(lTime >= rTime ? l : r);
+      } else if (l && !r) {
+        // Only local: kept if created after last sync (new offline item)
+        // Otherwise it was in sync before → missing remotely means deleted elsewhere
+        if (!l.createdAt || l.createdAt > lastSyncIso) merged.push(l);
+      } else if (r && !l) {
+        // Only remote: kept if created after last sync (new on another device)
+        // Otherwise it was in sync before → missing locally means deleted here
+        if (!r.createdAt || r.createdAt > lastSyncIso) merged.push(r);
+      }
+    }
+    return merged;
+  };
+
+  return {
+    projects: mergeItems(local.projects, remote.projects),
+    tasks: mergeItems(local.tasks, remote.tasks),
+  };
+};
 
 // Load a valid (non-expired) stored token, if any
 const loadStoredToken = () => {
@@ -340,6 +384,7 @@ export default function App() {
   dataRef.current = data;
   const refreshTimer = useRef(null);
   const feedRef = useRef(null);
+  const syncFromSheetsRef = useRef(null);
 
   // Persist migrated localStorage data once (if legacy embedded subtasks were present)
   useEffect(() => {
@@ -394,15 +439,13 @@ export default function App() {
     }
   }, [view, activeProjectId, viewingTaskId, data.projects, data.tasks]);
 
-  // Online/offline detection + auto-sync on reconnect
+  // Online/offline detection + full sync on reconnect
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
       if (token && sheetId) {
-        setSyncStatus("syncing");
-        writeToSheets(token, sheetId, dataRef.current)
-          .then(() => setSyncStatus("ok"))
-          .catch(() => setSyncStatus("error"));
+        // Trigger a full merge-sync instead of a blind push
+        setTimeout(() => { syncFromSheetsRef.current?.(); }, 0);
       }
     };
     const handleOffline = () => setIsOnline(false);
@@ -422,7 +465,10 @@ export default function App() {
       if (token && sheetId) {
         setSyncStatus("syncing");
         writeToSheets(token, sheetId, next)
-          .then(() => setSyncStatus("ok"))
+          .then(() => {
+            try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
+            setSyncStatus("ok");
+          })
           .catch(() => setSyncStatus("error"));
       }
     },
@@ -508,16 +554,20 @@ export default function App() {
     setSyncStatus("syncing");
     try {
       const remote = await readFromSheets(token, sheetId);
-      if (remote.projects.length || remote.tasks.length) {
-        save({ ...remote });
-      } else {
-        await writeToSheets(token, sheetId, data);
-      }
+      const lastSync = parseInt(localStorage.getItem(LS_LAST_SYNC) || "0", 10);
+      const merged = mergeData(dataRef.current, remote, lastSync);
+      // Persist merged state locally
+      setData(merged);
+      try { localStorage.setItem(LS_KEY, JSON.stringify(merged)); } catch {}
+      // Push merged state to remote so both sides converge
+      await writeToSheets(token, sheetId, merged);
+      try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
       setSyncStatus("ok");
     } catch {
       setSyncStatus("error");
     }
   };
+  syncFromSheetsRef.current = syncFromSheets;
 
   const createSheet = async () => {
     if (!token) return;
