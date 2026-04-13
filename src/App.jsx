@@ -314,6 +314,21 @@ export default function App() {
 
   useEffect(() => { loadGsi(); }, [loadGsi]);
 
+  // Mouse wheel → horizontal scroll on priority feed
+  useEffect(() => {
+    const el = feedRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      if (e.deltaY === 0) return;
+      // Only intercept when horizontal scroll is actually possible
+      if (el.scrollWidth <= el.clientWidth) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [view, data.tasks.length]);
+
   // Auto-refresh token ~1 minute before expiry
   useEffect(() => {
     if (!token) return;
