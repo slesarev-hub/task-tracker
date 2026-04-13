@@ -230,6 +230,7 @@ export default function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const refreshTimer = useRef(null);
+  const feedRef = useRef(null);
 
   // Load data from localStorage
   useEffect(() => {
@@ -557,6 +558,16 @@ export default function App() {
   const draggedTask = activeId ? data.tasks.find((t) => t.id === activeId) : null;
   const deleteProjectName = confirmDeleteId ? data.projects.find((p) => p.id === confirmDeleteId)?.name : "";
 
+  // Priority feed: all active tasks from all projects, sorted by priority
+  const priorityFeed = data.tasks
+    .filter((t) => t.column !== "done" && t.column !== "cancelled")
+    .sort((a, b) => {
+      const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
+      const pb = PRIORITY_RANK[b.priority || "none"] ?? 2;
+      if (pa !== pb) return pa - pb;
+      return (a.updatedAt || "").localeCompare(b.updatedAt || "");
+    });
+
   // Columns to render (all on desktop, selected on mobile)
   const visibleColumns = isMobile ? COLUMNS.filter((c) => c.id === mobileCol) : COLUMNS;
 
@@ -654,6 +665,57 @@ export default function App() {
           font-size: 14px; transition: border-color 0.15s;
         }
         .add-card:hover { border-color: #3b82f6; color: #e8eaf0; }
+
+        /* Priority feed */
+        .priority-feed-wrap { margin-bottom: 20px; }
+        .priority-feed-header {
+          display: flex; align-items: center; justify-content: space-between;
+          margin-bottom: 8px;
+        }
+        .priority-feed-title {
+          font-size: 12px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.5px; color: #6b7280;
+        }
+        .priority-feed-nav { display: flex; gap: 4px; }
+        .feed-arrow {
+          padding: 4px 10px; font-size: 14px; line-height: 1;
+        }
+        .priority-feed {
+          display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px;
+          scroll-snap-type: x proximity;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: thin;
+        }
+        .priority-feed::-webkit-scrollbar { height: 6px; }
+        .priority-feed::-webkit-scrollbar-thumb {
+          background: #2a2d38; border-radius: 3px;
+        }
+        .feed-card {
+          flex: 0 0 220px; background: #161820; border: 1px solid #2a2d38;
+          border-left: 3px solid transparent; border-radius: 8px;
+          padding: 10px 12px; cursor: pointer; transition: border-color 0.15s;
+          scroll-snap-align: start;
+          display: flex; flex-direction: column; gap: 4px;
+        }
+        .feed-card.priority-urgent { border-left-color: #ef4444; }
+        .feed-card.priority-soon { border-left-color: #f59e0b; }
+        .feed-card:hover { border-color: #3b82f6; }
+        .feed-card.priority-urgent:hover { border-left-color: #ef4444; }
+        .feed-card.priority-soon:hover { border-left-color: #f59e0b; }
+        .feed-card-project {
+          font-size: 10px; color: #6b7280; text-transform: uppercase;
+          letter-spacing: 0.5px; font-weight: 600;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .feed-card-title {
+          font-size: 13px; color: #e8eaf0; line-height: 1.3;
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .feed-card-meta {
+          display: flex; gap: 8px; margin-top: 2px; font-size: 10px;
+          font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+        }
 
         /* Empty state */
         .empty-state {
@@ -893,6 +955,53 @@ export default function App() {
             {data.projects.length === 0 && (
               <div className="empty-state">
                 <p>No projects yet. Create your first one.</p>
+              </div>
+            )}
+            {priorityFeed.length > 0 && (
+              <div className="priority-feed-wrap">
+                <div className="priority-feed-header">
+                  <span className="priority-feed-title">Priority feed</span>
+                  <div className="priority-feed-nav">
+                    <button
+                      className="feed-arrow"
+                      onClick={() => feedRef.current?.scrollBy({ left: -240, behavior: "smooth" })}
+                      title="Scroll left"
+                    >&larr;</button>
+                    <button
+                      className="feed-arrow"
+                      onClick={() => feedRef.current?.scrollBy({ left: 240, behavior: "smooth" })}
+                      title="Scroll right"
+                    >&rarr;</button>
+                  </div>
+                </div>
+                <div className="priority-feed" ref={feedRef}>
+                  {priorityFeed.map((t) => {
+                    const priorityDef = PRIORITIES.find((p) => p.id === (t.priority || "none"));
+                    const projName = data.projects.find((p) => p.id === t.projectId)?.name || "";
+                    const colDef = COLUMNS.find((c) => c.id === t.column);
+                    return (
+                      <div
+                        key={t.id}
+                        className={`feed-card priority-${t.priority || "none"}`}
+                        style={{ "--priority-color": priorityDef.color }}
+                        onClick={() => openProject(t.projectId)}
+                      >
+                        <div className="feed-card-project">{projName}</div>
+                        <div className="feed-card-title">{t.title}</div>
+                        <div className="feed-card-meta">
+                          <span className="feed-card-col" style={{ color: colDef?.color }}>
+                            {colDef?.label}
+                          </span>
+                          {t.priority !== "none" && (
+                            <span className="feed-card-prio" style={{ color: priorityDef.color }}>
+                              {priorityDef.label}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
             <div className="projects-grid">
