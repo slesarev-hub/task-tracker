@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import {
   DndContext,
   DragOverlay,
@@ -236,29 +236,30 @@ const writeToSheets = async (token, sid, data) => {
   ]);
 };
 
-// ── Sortable Task Card ───────────────────────────────────────────────────────
-function SortableTask({ task, onEdit, onDelete, onView, childCount, childDoneCount }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: task.id,
-    data: { type: "task", task },
-  });
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.4 : 1,
-  };
+// ── Task Card body (shared by Sortable and Static wrappers) ──────────────────
+function TaskCardBody({
+  task, onEdit, onDelete, onView,
+  childCount, childDoneCount,
+  expanded, onToggleExpand,
+  depth = 0,
+  setNodeRef, style, listeners, attributes,
+}) {
   const priority = task.priority || "none";
   const priorityDef = PRIORITIES.find((p) => p.id === priority);
-  // First line of description for compact preview
   const descPreview = task.description ? task.description.split("\n").find((l) => l.trim()) || "" : "";
   const hasMoreDesc = task.description && task.description.includes("\n");
+  const combinedStyle = {
+    ...(style || {}),
+    "--priority-color": priorityDef.color,
+  };
   return (
     <div
       ref={setNodeRef}
-      style={{ ...style, "--priority-color": priorityDef.color }}
-      {...attributes}
-      {...listeners}
-      className={`task-card priority-${priority} col-${task.column}`}
+      style={combinedStyle}
+      {...(attributes || {})}
+      {...(listeners || {})}
+      className={`task-card priority-${priority} col-${task.column}${depth > 0 ? " task-card-child" : ""}`}
+      data-depth={depth || 0}
       onClick={() => onView(task)}
     >
       <div className="task-title">{task.title}</div>
@@ -274,9 +275,19 @@ function SortableTask({ task, onEdit, onDelete, onView, childCount, childDoneCou
           </span>
         )}
         {childCount > 0 && (
-          <span className={`task-subtasks-progress${childDoneCount === childCount ? " all-done" : ""}`}>
-            ☑ {childDoneCount}/{childCount}
-          </span>
+          <button
+            type="button"
+            className={`task-subtasks-progress${childDoneCount === childCount ? " all-done" : ""}${expanded ? " expanded" : ""}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleExpand(task.id);
+            }}
+            title={expanded ? "Collapse subtasks" : "Expand subtasks"}
+          >
+            <span className="expand-arrow">{expanded ? "▾" : "▸"}</span>
+            {childDoneCount}/{childCount}
+          </button>
         )}
       </div>
       <div className="task-actions" onPointerDown={(e) => e.stopPropagation()}>
@@ -285,6 +296,33 @@ function SortableTask({ task, onEdit, onDelete, onView, childCount, childDoneCou
       </div>
     </div>
   );
+}
+
+// Draggable wrapper for top-level tasks on the board
+function SortableTask(props) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: props.task.id,
+    data: { type: "task", task: props.task },
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+  };
+  return (
+    <TaskCardBody
+      {...props}
+      setNodeRef={setNodeRef}
+      style={style}
+      listeners={listeners}
+      attributes={attributes}
+    />
+  );
+}
+
+// Non-draggable static wrapper for expanded inline children
+function StaticTask(props) {
+  return <TaskCardBody {...props} />;
 }
 
 // ── Droppable Column ─────────────────────────────────────────────────────────
@@ -296,8 +334,34 @@ function ColumnDropZone({ columnId, children }) {
   return <div ref={setNodeRef} style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minHeight: 60 }}>{children}</div>;
 }
 
-function Column({ col, tasks, onEdit, onDelete, onAdd, onView, childStats }) {
+function Column({
+  col, tasks, onEdit, onDelete, onAdd, onView, childStats,
+  expandedIds, onToggleExpand, getChildren,
+}) {
   const taskIds = tasks.map((t) => t.id);
+
+  // Recursively render children of a given parent
+  const renderChildrenOf = (parentId, depth) => {
+    const children = getChildren(parentId);
+    if (children.length === 0) return null;
+    return children.map((c) => (
+      <Fragment key={c.id}>
+        <StaticTask
+          task={c}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onView={onView}
+          childCount={childStats[c.id]?.count || 0}
+          childDoneCount={childStats[c.id]?.done || 0}
+          expanded={expandedIds.has(c.id)}
+          onToggleExpand={onToggleExpand}
+          depth={depth}
+        />
+        {expandedIds.has(c.id) && renderChildrenOf(c.id, depth + 1)}
+      </Fragment>
+    ));
+  };
+
   return (
     <div className="column">
       <div className="column-header" style={{ borderBottomColor: col.color }}>
@@ -308,15 +372,19 @@ function Column({ col, tasks, onEdit, onDelete, onAdd, onView, childStats }) {
         <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
           <ColumnDropZone columnId={col.id}>
             {tasks.map((t) => (
-              <SortableTask
-                key={t.id}
-                task={t}
-                onEdit={onEdit}
-                onDelete={onDelete}
-                onView={onView}
-                childCount={childStats[t.id]?.count || 0}
-                childDoneCount={childStats[t.id]?.done || 0}
-              />
+              <Fragment key={t.id}>
+                <SortableTask
+                  task={t}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                  onView={onView}
+                  childCount={childStats[t.id]?.count || 0}
+                  childDoneCount={childStats[t.id]?.done || 0}
+                  expanded={expandedIds.has(t.id)}
+                  onToggleExpand={onToggleExpand}
+                />
+                {expandedIds.has(t.id) && renderChildrenOf(t.id, 1)}
+              </Fragment>
             ))}
           </ColumnDropZone>
         </SortableContext>
@@ -364,7 +432,17 @@ export default function App() {
   const [editingTask, setEditingTask] = useState(null);
   const [editPreview, setEditPreview] = useState(false);
   const [activeId, setActiveId] = useState(null);
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
   const skipHashSync = useRef(false);
+
+  const toggleExpand = useCallback((id) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Mobile & online state
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -1094,9 +1172,39 @@ export default function App() {
         }
         .task-subtasks-progress {
           font-size: 11px; color: #6b7280; font-weight: 500;
-          display: inline-flex; align-items: center; gap: 3px;
+          display: inline-flex; align-items: center; gap: 4px;
+          background: transparent; border: 1px solid #2a2d38;
+          padding: 2px 8px; border-radius: 10px;
+          cursor: pointer; transition: all 0.1s;
         }
-        .task-subtasks-progress.all-done { color: #22c55e; }
+        .task-subtasks-progress:hover { color: #e8eaf0; border-color: #3b82f6; }
+        .task-subtasks-progress.all-done { color: #22c55e; border-color: #1e3a27; }
+        .task-subtasks-progress .expand-arrow {
+          display: inline-block; font-size: 9px; line-height: 1; width: 8px;
+        }
+
+        /* Nested child cards in column */
+        .task-card-child {
+          margin-left: 18px;
+          position: relative;
+        }
+        .task-card-child::before {
+          content: "";
+          position: absolute;
+          left: -11px;
+          top: 0;
+          bottom: 50%;
+          width: 8px;
+          border-left: 1px solid #2a2d38;
+          border-bottom: 1px solid #2a2d38;
+          border-bottom-left-radius: 6px;
+          pointer-events: none;
+        }
+        .task-card-child[data-depth="2"] { margin-left: 36px; }
+        .task-card-child[data-depth="2"]::before { left: -11px; }
+        .task-card-child[data-depth="3"] { margin-left: 54px; }
+        .task-card-child[data-depth="4"] { margin-left: 72px; }
+        .task-card-child[data-depth="5"] { margin-left: 90px; }
 
         /* Subtasks in view modal */
         .subtasks-details {
@@ -1603,6 +1711,9 @@ export default function App() {
                     onAdd={addTask}
                     onView={viewTask}
                     childStats={childStats}
+                    expandedIds={expandedIds}
+                    onToggleExpand={toggleExpand}
+                    getChildren={getChildren}
                   />
                 ))}
               </div>
