@@ -55,7 +55,15 @@ const mergeData = (local, remote, lastSyncedAt = 0) => {
         // Both present → take whichever has newer updatedAt (ties prefer local)
         const lTime = l.updatedAt || "";
         const rTime = r.updatedAt || "";
-        merged.push(lTime >= rTime ? l : r);
+        const winner = lTime >= rTime ? l : r;
+        // parentId regression guard: since there's no UI to "unparent" a task,
+        // losing parentId is always a bug. If either side still has it, keep it.
+        const lPid = (l.parentId && String(l.parentId).trim()) || null;
+        const rPid = (r.parentId && String(r.parentId).trim()) || null;
+        let parentId = winner.parentId || null;
+        if (lPid && !rPid) parentId = lPid;
+        else if (!lPid && rPid) parentId = rPid;
+        merged.push({ ...winner, parentId });
       } else if (l && !r) {
         // Only local: kept if created after last sync (new offline item)
         // Otherwise it was in sync before → missing remotely means deleted elsewhere
@@ -640,6 +648,20 @@ export default function App() {
   const logout = () => {
     setToken(null);
     try { localStorage.removeItem(LS_TOKEN); } catch {}
+  };
+
+  // Overwrite remote with current local state, no merge.
+  // Use this from the device that has the correct data to fix a broken sheet.
+  const forcePushToSheets = async () => {
+    if (!token || !sheetId) return;
+    setSyncStatus("syncing");
+    try {
+      await writeToSheets(token, sheetId, dataRef.current);
+      try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
+      setSyncStatus("ok");
+    } catch {
+      setSyncStatus("error");
+    }
   };
 
   const syncFromSheets = async () => {
@@ -1594,6 +1616,13 @@ export default function App() {
               <button className="btn-sm btn-primary" onClick={saveSetup}>Save</button>
               <button className="btn-sm" onClick={() => setShowSetup(false)}>Cancel</button>
             </div>
+            {token && sheetId && (
+              <div className="setup-row" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2a2d38" }}>
+                <button className="btn-sm btn-danger" onClick={forcePushToSheets}>
+                  Force push (overwrite remote)
+                </button>
+              </div>
+            )}
           </div>
         )}
 
