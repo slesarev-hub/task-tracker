@@ -30,6 +30,13 @@ const COLUMNS = [
   { id: "cancelled", label: "Cancelled", color: "#ef4444" },
 ];
 
+const PRIORITIES = [
+  { id: "urgent", label: "Urgent", short: "!", color: "#ef4444", hint: "Do today" },
+  { id: "soon", label: "Soon", short: "~", color: "#f59e0b", hint: "Next few weeks" },
+  { id: "none", label: "No rush", short: "·", color: "#4b5563", hint: "No deadline" },
+];
+const PRIORITY_RANK = { urgent: 0, soon: 1, none: 2 };
+
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const now = () => new Date().toISOString();
 
@@ -88,13 +95,15 @@ const createSpreadsheet = async (token) => {
 const readFromSheets = async (token, sid) => {
   const [projRes, taskRes] = await Promise.all([
     sheetsGet(token, sid, "Projects!A2:D"),
-    sheetsGet(token, sid, "Tasks!A2:H"),
+    sheetsGet(token, sid, "Tasks!A2:I"),
   ]);
   const projects = (projRes.values || []).map(([id, name, createdAt, updatedAt]) => ({
     id, name, createdAt, updatedAt,
   }));
-  const tasks = (taskRes.values || []).map(([id, projectId, title, column, order, createdAt, updatedAt, description]) => ({
-    id, projectId, title, column, order: parseFloat(order), createdAt, updatedAt, description: description || "",
+  const tasks = (taskRes.values || []).map(([id, projectId, title, column, order, createdAt, updatedAt, description, priority]) => ({
+    id, projectId, title, column, order: parseFloat(order), createdAt, updatedAt,
+    description: description || "",
+    priority: priority || "none",
   }));
   return { projects, tasks };
 };
@@ -106,8 +115,8 @@ const writeToSheets = async (token, sid, data) => {
     ...data.projects.map((p) => [p.id, p.name, p.createdAt, p.updatedAt]),
   ]);
   await sheetsUpdate(token, sid, "Tasks!A1", [
-    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description"],
-    ...data.tasks.map((t) => [t.id, t.projectId, t.title, t.column, String(t.order), t.createdAt, t.updatedAt, t.description || ""]),
+    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority"],
+    ...data.tasks.map((t) => [t.id, t.projectId, t.title, t.column, String(t.order), t.createdAt, t.updatedAt, t.description || "", t.priority || "none"]),
   ]);
 };
 
@@ -122,10 +131,23 @@ function SortableTask({ task, onEdit, onDelete }) {
     transition,
     opacity: isDragging ? 0.4 : 1,
   };
+  const priority = task.priority || "none";
+  const priorityDef = PRIORITIES.find((p) => p.id === priority);
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="task-card">
+    <div
+      ref={setNodeRef}
+      style={{ ...style, "--priority-color": priorityDef.color }}
+      {...attributes}
+      {...listeners}
+      className={`task-card priority-${priority}`}
+    >
       <div className="task-title">{task.title}</div>
       {task.description && <div className="task-desc">{task.description}</div>}
+      {priority !== "none" && (
+        <div className="task-priority-badge" style={{ color: priorityDef.color }}>
+          {priorityDef.label}
+        </div>
+      )}
       <div className="task-actions" onPointerDown={(e) => e.stopPropagation()}>
         <button className="btn-icon" onClick={() => onEdit(task)} title="Edit">&#9998;</button>
         <button className="btn-icon btn-del" onClick={() => onDelete(task.id)} title="Delete">&times;</button>
@@ -331,7 +353,7 @@ export default function App() {
     setModal("addTask");
     setModalValue("");
     setModalDesc("");
-    setEditingTask({ column: columnId });
+    setEditingTask({ column: columnId, priority: "none" });
   };
   const confirmAddTask = () => {
     if (!modalValue.trim()) return;
@@ -346,6 +368,7 @@ export default function App() {
       title: modalValue.trim(),
       description: modalDesc.trim(),
       column: editingTask.column,
+      priority: editingTask.priority || "none",
       order: maxOrder + 1,
       createdAt: t,
       updatedAt: t,
@@ -358,7 +381,7 @@ export default function App() {
     setModal("editTask");
     setModalValue(task.title);
     setModalDesc(task.description || "");
-    setEditingTask({ ...task });
+    setEditingTask({ ...task, priority: task.priority || "none" });
   };
   const confirmEditTask = () => {
     if (!modalValue.trim()) return;
@@ -377,7 +400,15 @@ export default function App() {
       ...data,
       tasks: data.tasks.map((t) =>
         t.id === editingTask.id
-          ? { ...t, title: modalValue.trim(), description: modalDesc.trim(), column: editingTask.column, order: newOrder, updatedAt: now() }
+          ? {
+              ...t,
+              title: modalValue.trim(),
+              description: modalDesc.trim(),
+              column: editingTask.column,
+              priority: editingTask.priority || "none",
+              order: newOrder,
+              updatedAt: now(),
+            }
           : t
       ),
     });
@@ -433,7 +464,12 @@ export default function App() {
     if (active.id !== over.id && activeCol === overCol) {
       const colTasks = data.tasks
         .filter((t) => t.projectId === activeProjectId && t.column === activeCol)
-        .sort((a, b) => a.order - b.order);
+        .sort((a, b) => {
+          const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
+          const pb = PRIORITY_RANK[b.priority || "none"] ?? 2;
+          if (pa !== pb) return pa - pb;
+          return a.order - b.order;
+        });
       const oldIdx = colTasks.findIndex((t) => t.id === active.id);
       const newIdx = colTasks.findIndex((t) => t.id === over.id);
       if (oldIdx === -1 || newIdx === -1) return;
@@ -459,7 +495,12 @@ export default function App() {
   COLUMNS.forEach((c) => {
     tasksByColumn[c.id] = projectTasks
       .filter((t) => t.column === c.id)
-      .sort((a, b) => a.order - b.order);
+      .sort((a, b) => {
+        const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
+        const pb = PRIORITY_RANK[b.priority || "none"] ?? 2;
+        if (pa !== pb) return pa - pb;
+        return a.order - b.order;
+      });
   });
 
   const draggedTask = activeId ? data.tasks.find((t) => t.id === activeId) : null;
@@ -620,15 +661,44 @@ export default function App() {
         }
         .task-card {
           background: #1e2028; border: 1px solid #2a2d38; border-radius: 8px;
-          padding: 10px 12px; cursor: grab; position: relative;
+          padding: 10px 12px 10px 14px; cursor: grab; position: relative;
           touch-action: none; transition: border-color 0.15s;
+          border-left: 3px solid transparent;
         }
+        .task-card.priority-urgent { border-left-color: #ef4444; }
+        .task-card.priority-soon { border-left-color: #f59e0b; }
         .task-card:hover { border-color: #3b82f6; }
+        .task-card.priority-urgent:hover { border-left-color: #ef4444; }
+        .task-card.priority-soon:hover { border-left-color: #f59e0b; }
         .task-card:active { cursor: grabbing; }
         .task-title { font-size: 14px; font-weight: 400; padding-right: 48px; }
         .task-desc {
           font-size: 12px; color: #6b7280; margin-top: 4px;
           white-space: pre-wrap; word-break: break-word;
+        }
+        .task-priority-badge {
+          display: inline-block; margin-top: 6px; font-size: 10px;
+          font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+        }
+
+        /* Priority selector in modal */
+        .priority-selector {
+          display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+        }
+        .priority-btn {
+          flex: 1; min-width: 80px; padding: 8px 10px; font-size: 12px;
+          background: #0d0f14; border: 1px solid #2a2d38; color: #9ca3af;
+          border-radius: 6px; cursor: pointer; transition: all 0.15s;
+          font-weight: 500;
+        }
+        .priority-btn:hover {
+          border-color: var(--priority-color);
+          color: var(--priority-color);
+        }
+        .priority-btn.active {
+          background: var(--priority-color);
+          border-color: var(--priority-color);
+          color: #fff;
         }
         .task-actions {
           position: absolute; top: 8px; right: 8px; display: flex; gap: 2px;
@@ -869,7 +939,7 @@ export default function App() {
         )}
 
         {/* Modal: Add Task */}
-        {modal === "addTask" && (
+        {modal === "addTask" && editingTask && (
           <div className="modal-backdrop" onClick={() => setModal(null)}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <h3>New task</h3>
@@ -885,6 +955,20 @@ export default function App() {
                 value={modalDesc}
                 onChange={(e) => setModalDesc(e.target.value)}
               />
+              <div className="priority-selector">
+                {PRIORITIES.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`priority-btn${editingTask.priority === p.id ? " active" : ""}`}
+                    style={{ "--priority-color": p.color }}
+                    onClick={() => setEditingTask({ ...editingTask, priority: p.id })}
+                    title={p.hint}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
                 <button className="btn-primary" onClick={confirmAddTask}>Add</button>
@@ -918,6 +1002,20 @@ export default function App() {
                   <option key={c.id} value={c.id}>{c.label}</option>
                 ))}
               </select>
+              <div className="priority-selector">
+                {PRIORITIES.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`priority-btn${editingTask.priority === p.id ? " active" : ""}`}
+                    style={{ "--priority-color": p.color }}
+                    onClick={() => setEditingTask({ ...editingTask, priority: p.id })}
+                    title={p.hint}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
                 <button className="btn-primary" onClick={confirmEditTask}>Save</button>
