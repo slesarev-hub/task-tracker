@@ -32,17 +32,12 @@ const LS_EXPANDED = "task-tracker-expanded";
 const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
 
-// Merge local and remote data using per-item updatedAt timestamps.
-// The lastSyncedAt cutoff distinguishes "newly added" from "deleted" for items
-// that appear in only one side — avoiding lost deletes and lost offline creates.
-const mergeData = (local, remote, lastSyncedAt = 0) => {
-  const remoteEmpty =
-    (!remote.projects || remote.projects.length === 0) &&
-    (!remote.tasks || remote.tasks.length === 0);
-  if (remoteEmpty) return local; // fresh/empty sheet: safer to keep local as-is
-
-  const lastSyncIso = new Date(lastSyncedAt).toISOString();
-
+// Merge local and remote using pure UNION semantics: items present on either
+// side are always kept. If the same id appears in both, whichever has a newer
+// updatedAt wins. This is intentionally non-lossy — delete propagation is
+// sacrificed to prevent data loss from sync races or mismatched app versions.
+// (Proper delete propagation would require tombstones, added later.)
+const mergeData = (local, remote) => {
   const mergeItems = (localItems, remoteItems) => {
     const localById = new Map((localItems || []).map((i) => [i.id, i]));
     const remoteById = new Map((remoteItems || []).map((i) => [i.id, i]));
@@ -64,14 +59,10 @@ const mergeData = (local, remote, lastSyncedAt = 0) => {
         if (lPid && !rPid) parentId = lPid;
         else if (!lPid && rPid) parentId = rPid;
         merged.push({ ...winner, parentId });
-      } else if (l && !r) {
-        // Only local: kept if created after last sync (new offline item)
-        // Otherwise it was in sync before → missing remotely means deleted elsewhere
-        if (!l.createdAt || l.createdAt > lastSyncIso) merged.push(l);
-      } else if (r && !l) {
-        // Only remote: kept if created after last sync (new on another device)
-        // Otherwise it was in sync before → missing locally means deleted here
-        if (!r.createdAt || r.createdAt > lastSyncIso) merged.push(r);
+      } else if (l) {
+        merged.push(l);
+      } else if (r) {
+        merged.push(r);
       }
     }
     return merged;
