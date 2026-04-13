@@ -109,14 +109,35 @@ const createSpreadsheet = async (token) => {
   if (!r.ok) throw new Error("Cannot create spreadsheet");
   return (await r.json()).spreadsheetId;
 };
-const parseSubtasks = (raw) => {
-  if (!raw) return [];
-  try {
-    const v = JSON.parse(raw);
-    return Array.isArray(v) ? v : [];
-  } catch {
-    return [];
+// Migrate legacy embedded subtasks into flat tasks with parentId
+const migrateTasks = (rawTasks) => {
+  const out = [];
+  for (const t of rawTasks || []) {
+    const { subtasks, ...rest } = t;
+    out.push({
+      ...rest,
+      parentId: rest.parentId || null,
+      priority: rest.priority || "none",
+    });
+    if (Array.isArray(subtasks) && subtasks.length > 0) {
+      subtasks.forEach((s, i) => {
+        if (!s || !s.title) return;
+        out.push({
+          id: s.id || (Math.random().toString(36).slice(2, 10) + Date.now().toString(36) + i),
+          projectId: t.projectId,
+          parentId: t.id,
+          title: s.title,
+          description: "",
+          column: s.done ? "done" : (t.column || "todo"),
+          priority: "none",
+          order: i,
+          createdAt: t.createdAt || new Date().toISOString(),
+          updatedAt: t.updatedAt || new Date().toISOString(),
+        });
+      });
+    }
   }
+  return out;
 };
 
 const readFromSheets = async (token, sid) => {
@@ -127,13 +148,32 @@ const readFromSheets = async (token, sid) => {
   const projects = (projRes.values || []).map(([id, name, createdAt, updatedAt]) => ({
     id, name, createdAt, updatedAt,
   }));
-  const tasks = (taskRes.values || []).map(([id, projectId, title, column, order, createdAt, updatedAt, description, priority, subtasks]) => ({
-    id, projectId, title, column, order: parseFloat(order), createdAt, updatedAt,
-    description: description || "",
-    priority: priority || "none",
-    subtasks: parseSubtasks(subtasks),
-  }));
-  return { projects, tasks };
+  const tasks = (taskRes.values || []).map((row) => {
+    const [id, projectId, title, column, order, createdAt, updatedAt, description, priority, colJ] = row;
+    // Column J may contain legacy subtasks JSON or new parentId string
+    let parentId = null;
+    let legacySubtasks = null;
+    if (colJ && typeof colJ === "string") {
+      const trimmed = colJ.trim();
+      if (trimmed.startsWith("[")) {
+        try {
+          const arr = JSON.parse(trimmed);
+          if (Array.isArray(arr) && arr.length > 0) legacySubtasks = arr;
+        } catch {}
+      } else if (trimmed) {
+        parentId = trimmed;
+      }
+    }
+    return {
+      id, projectId, title, column, order: parseFloat(order),
+      createdAt, updatedAt,
+      description: description || "",
+      priority: priority || "none",
+      parentId,
+      ...(legacySubtasks ? { subtasks: legacySubtasks } : {}),
+    };
+  });
+  return { projects, tasks: migrateTasks(tasks) };
 };
 const writeToSheets = async (token, sid, data) => {
   await sheetsClear(token, sid, "Projects!A1:Z");
@@ -143,17 +183,17 @@ const writeToSheets = async (token, sid, data) => {
     ...data.projects.map((p) => [p.id, p.name, p.createdAt, p.updatedAt]),
   ]);
   await sheetsUpdate(token, sid, "Tasks!A1", [
-    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "subtasks"],
+    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "parentId"],
     ...data.tasks.map((t) => [
       t.id, t.projectId, t.title, t.column, String(t.order), t.createdAt, t.updatedAt,
       t.description || "", t.priority || "none",
-      JSON.stringify(t.subtasks || []),
+      t.parentId || "",
     ]),
   ]);
 };
 
 // ── Sortable Task Card ───────────────────────────────────────────────────────
-function SortableTask({ task, onEdit, onDelete, onView }) {
+function SortableTask({ task, onEdit, onDelete, onView, childCount, childDoneCount }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: { type: "task", task },
@@ -168,8 +208,6 @@ function SortableTask({ task, onEdit, onDelete, onView }) {
   // First line of description for compact preview
   const descPreview = task.description ? task.description.split("\n").find((l) => l.trim()) || "" : "";
   const hasMoreDesc = task.description && task.description.includes("\n");
-  const subtasks = task.subtasks || [];
-  const subtasksDone = subtasks.filter((s) => s.done).length;
   return (
     <div
       ref={setNodeRef}
@@ -191,9 +229,9 @@ function SortableTask({ task, onEdit, onDelete, onView }) {
             {priorityDef.label}
           </span>
         )}
-        {subtasks.length > 0 && (
-          <span className={`task-subtasks-progress${subtasksDone === subtasks.length ? " all-done" : ""}`}>
-            ☑ {subtasksDone}/{subtasks.length}
+        {childCount > 0 && (
+          <span className={`task-subtasks-progress${childDoneCount === childCount ? " all-done" : ""}`}>
+            ☑ {childDoneCount}/{childCount}
           </span>
         )}
       </div>
@@ -214,7 +252,7 @@ function ColumnDropZone({ columnId, children }) {
   return <div ref={setNodeRef} style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minHeight: 60 }}>{children}</div>;
 }
 
-function Column({ col, tasks, onEdit, onDelete, onAdd, onView }) {
+function Column({ col, tasks, onEdit, onDelete, onAdd, onView, childStats }) {
   const taskIds = tasks.map((t) => t.id);
   return (
     <div className="column">
@@ -226,7 +264,15 @@ function Column({ col, tasks, onEdit, onDelete, onAdd, onView }) {
         <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
           <ColumnDropZone columnId={col.id}>
             {tasks.map((t) => (
-              <SortableTask key={t.id} task={t} onEdit={onEdit} onDelete={onDelete} onView={onView} />
+              <SortableTask
+                key={t.id}
+                task={t}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                onView={onView}
+                childCount={childStats[t.id]?.count || 0}
+                childDoneCount={childStats[t.id]?.done || 0}
+              />
             ))}
           </ColumnDropZone>
         </SortableContext>
@@ -245,9 +291,8 @@ export default function App() {
   const [modalValue, setModalValue] = useState("");
   const [modalDesc, setModalDesc] = useState("");
   const [editingTask, setEditingTask] = useState(null);
-  const [viewingTask, setViewingTask] = useState(null);
+  const [viewingTaskId, setViewingTaskId] = useState(null);
   const [editPreview, setEditPreview] = useState(false);
-  const [subtaskInput, setSubtaskInput] = useState("");
   const [activeId, setActiveId] = useState(null);
 
   // Mobile & online state
@@ -273,7 +318,18 @@ export default function App() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (raw) setData(JSON.parse(raw));
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      // Run migration: flatten any embedded subtasks into children with parentId
+      const migrated = { ...parsed, tasks: migrateTasks(parsed.tasks) };
+      setData(migrated);
+      // Persist the migrated form so we don't re-migrate on every load
+      const wasLegacy = (parsed.tasks || []).some(
+        (t) => Array.isArray(t.subtasks) && t.subtasks.length > 0
+      );
+      if (wasLegacy) {
+        try { localStorage.setItem(LS_KEY, JSON.stringify(migrated)); } catch {}
+      }
     } catch {}
   }, []);
 
@@ -453,28 +509,40 @@ export default function App() {
   const openProject = (pid) => { setActiveProjectId(pid); setView("board"); };
 
   // ── Task CRUD ────────────────────────────────────────────────────────────
-  const addTask = (columnId) => {
+  const addTask = (columnId, parentTask = null) => {
     setModal("addTask");
     setModalValue("");
     setModalDesc("");
-    setSubtaskInput("");
-    setEditingTask({ column: columnId, priority: "none", subtasks: [] });
+    setEditingTask({
+      column: columnId,
+      priority: "none",
+      parentId: parentTask?.id || null,
+      projectId: parentTask?.projectId || null,
+    });
+  };
+  const addSubtask = (parentTask) => {
+    addTask(parentTask.column, parentTask);
   };
   const confirmAddTask = () => {
     if (!modalValue.trim()) return;
     const t = now();
-    const colTasks = data.tasks.filter(
-      (tk) => tk.projectId === activeProjectId && tk.column === editingTask.column
+    const projectId = editingTask.projectId || activeProjectId;
+    const parentId = editingTask.parentId || null;
+    const siblings = data.tasks.filter(
+      (tk) =>
+        tk.projectId === projectId &&
+        tk.column === editingTask.column &&
+        (tk.parentId || null) === parentId
     );
-    const maxOrder = colTasks.length ? Math.max(...colTasks.map((tk) => tk.order)) : 0;
+    const maxOrder = siblings.length ? Math.max(...siblings.map((tk) => tk.order)) : 0;
     const task = {
       id: uid(),
-      projectId: activeProjectId,
+      projectId,
+      parentId,
       title: modalValue.trim(),
       description: modalDesc.trim(),
       column: editingTask.column,
       priority: editingTask.priority || "none",
-      subtasks: editingTask.subtasks || [],
       order: maxOrder + 1,
       createdAt: t,
       updatedAt: t,
@@ -487,52 +555,38 @@ export default function App() {
     setModal("editTask");
     setModalValue(task.title);
     setModalDesc(task.description || "");
-    setEditingTask({ ...task, priority: task.priority || "none", subtasks: task.subtasks || [] });
-    setSubtaskInput("");
+    setEditingTask({ ...task, priority: task.priority || "none" });
     setEditPreview(false);
   };
-  const viewTask = (task) => setViewingTask(task);
+  const viewTask = (task) => setViewingTaskId(task.id);
+  const viewingTask = viewingTaskId ? data.tasks.find((t) => t.id === viewingTaskId) : null;
 
-  // Subtask helpers
-  const addSubtaskEditing = () => {
-    const v = subtaskInput.trim();
-    if (!v || !editingTask) return;
-    setEditingTask({
-      ...editingTask,
-      subtasks: [...(editingTask.subtasks || []), { id: uid(), title: v, done: false }],
-    });
-    setSubtaskInput("");
-  };
-  const updateSubtaskEditing = (sid, patch) => {
-    setEditingTask({
-      ...editingTask,
-      subtasks: (editingTask.subtasks || []).map((s) => (s.id === sid ? { ...s, ...patch } : s)),
-    });
-  };
-  const removeSubtaskEditing = (sid) => {
-    setEditingTask({
-      ...editingTask,
-      subtasks: (editingTask.subtasks || []).filter((s) => s.id !== sid),
-    });
-  };
-  // Toggle subtask on an existing task (from view modal) — persists immediately
-  const toggleSubtask = (taskId, subtaskId) => {
-    const updatedTasks = data.tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            subtasks: (t.subtasks || []).map((s) =>
-              s.id === subtaskId ? { ...s, done: !s.done } : s
-            ),
-            updatedAt: now(),
-          }
-        : t
-    );
-    save({ ...data, tasks: updatedTasks });
-    if (viewingTask?.id === taskId) {
-      const newTask = updatedTasks.find((t) => t.id === taskId);
-      if (newTask) setViewingTask(newTask);
+  // Collect a task and all its descendants (for cascade delete)
+  const collectDescendants = (tid, tasks) => {
+    const ids = new Set([tid]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const t of tasks) {
+        if (t.parentId && ids.has(t.parentId) && !ids.has(t.id)) {
+          ids.add(t.id);
+          changed = true;
+        }
+      }
     }
+    return ids;
+  };
+  // Quick toggle a child's column between todo and done (from parent view)
+  const toggleTaskDone = (tid) => {
+    const target = data.tasks.find((t) => t.id === tid);
+    if (!target) return;
+    const newCol = target.column === "done" ? "todo" : "done";
+    save({
+      ...data,
+      tasks: data.tasks.map((t) =>
+        t.id === tid ? { ...t, column: newCol, updatedAt: now() } : t
+      ),
+    });
   };
   const confirmEditTask = () => {
     if (!modalValue.trim()) return;
@@ -557,7 +611,6 @@ export default function App() {
               description: modalDesc.trim(),
               column: editingTask.column,
               priority: editingTask.priority || "none",
-              subtasks: editingTask.subtasks || [],
               order: newOrder,
               updatedAt: now(),
             }
@@ -568,7 +621,11 @@ export default function App() {
     setEditingTask(null);
   };
   const deleteTask = (tid) => {
-    save({ ...data, tasks: data.tasks.filter((t) => t.id !== tid) });
+    const idsToDelete = collectDescendants(tid, data.tasks);
+    save({ ...data, tasks: data.tasks.filter((t) => !idsToDelete.has(t.id)) });
+    if (viewingTaskId && idsToDelete.has(viewingTaskId)) {
+      setViewingTaskId(null);
+    }
   };
 
   // ── Drag handlers ────────────────────────────────────────────────────────
@@ -643,9 +700,11 @@ export default function App() {
   // ── Derived data ─────────────────────────────────────────────────────────
   const activeProject = data.projects.find((p) => p.id === activeProjectId);
   const projectTasks = data.tasks.filter((t) => t.projectId === activeProjectId);
+  // Only top-level tasks appear on the kanban board
+  const topLevelProjectTasks = projectTasks.filter((t) => !t.parentId);
   const tasksByColumn = {};
   COLUMNS.forEach((c) => {
-    tasksByColumn[c.id] = projectTasks
+    tasksByColumn[c.id] = topLevelProjectTasks
       .filter((t) => t.column === c.id)
       .sort((a, b) => {
         const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
@@ -653,6 +712,25 @@ export default function App() {
         if (pa !== pb) return pa - pb;
         return a.order - b.order;
       });
+  });
+  // Helper: direct children of a task, sorted by priority then order
+  const getChildren = (tid) =>
+    data.tasks
+      .filter((t) => t.parentId === tid)
+      .sort((a, b) => {
+        const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
+        const pb = PRIORITY_RANK[b.priority || "none"] ?? 2;
+        if (pa !== pb) return pa - pb;
+        return a.order - b.order;
+      });
+  // Precompute direct-child counts for each task (for card indicators)
+  const childStats = {};
+  data.tasks.forEach((t) => {
+    if (t.parentId) {
+      if (!childStats[t.parentId]) childStats[t.parentId] = { count: 0, done: 0 };
+      childStats[t.parentId].count += 1;
+      if (t.column === "done") childStats[t.parentId].done += 1;
+    }
   });
 
   const draggedTask = activeId ? data.tasks.find((t) => t.id === activeId) : null;
@@ -1048,6 +1126,53 @@ export default function App() {
           letter-spacing: 0.5px; padding: 3px 8px; border-radius: 10px;
           border: 1px solid;
         }
+        .view-chip-muted { color: #9ca3af; border-color: #2a2d38; }
+        .view-actions-group { display: flex; gap: 6px; }
+
+        /* Children list in view modal */
+        .children-section {
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          padding: 10px 14px; margin-top: 10px;
+        }
+        .children-header {
+          display: flex; align-items: center; justify-content: space-between;
+          font-size: 12px; color: #9ca3af; font-weight: 600;
+          text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+        }
+        .children-list {
+          list-style: none; padding: 0; margin: 0 0 8px;
+          display: flex; flex-direction: column; gap: 2px;
+        }
+        .child-item {
+          display: flex; align-items: center; gap: 10px;
+          padding: 8px 10px; border-radius: 6px; cursor: pointer;
+          transition: background 0.1s;
+          border: 1px solid transparent;
+        }
+        .child-item:hover { background: #161820; border-color: #2a2d38; }
+        .child-item.done { opacity: 0.55; }
+        .child-item.done .child-title { text-decoration: line-through; color: #9ca3af; }
+        .child-item input[type="checkbox"] {
+          width: 16px; height: 16px; cursor: pointer; accent-color: #3b82f6;
+          flex-shrink: 0;
+        }
+        .child-title {
+          flex: 1; font-size: 13px; color: #e8eaf0;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .child-meta {
+          display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+          font-size: 10px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.5px;
+        }
+        .child-col, .child-prio { white-space: nowrap; }
+        .child-count { color: #6b7280; font-weight: 500; }
+        .child-chevron { color: #6b7280; font-size: 16px; line-height: 1; }
+        .add-subtask-btn {
+          width: 100%; background: transparent; border: 1px dashed #2a2d38;
+          color: #9ca3af;
+        }
+        .add-subtask-btn:hover { border-color: #3b82f6; color: #e8eaf0; background: transparent; }
         .textarea-big { min-height: 220px !important; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
         .markdown-preview {
           flex: 1; min-height: 220px; max-height: 60vh; overflow: auto;
@@ -1366,6 +1491,7 @@ export default function App() {
                     onDelete={deleteTask}
                     onAdd={addTask}
                     onView={viewTask}
+                    childStats={childStats}
                   />
                 ))}
               </div>
@@ -1430,57 +1556,6 @@ export default function App() {
                     {p.label}
                   </button>
                 ))}
-              </div>
-              <div className="subtasks-edit">
-                <div className="subtasks-edit-header">
-                  Subtasks
-                  {editingTask.subtasks?.length > 0 && (
-                    <span className="subtasks-progress-text">
-                      {editingTask.subtasks.filter((s) => s.done).length}/{editingTask.subtasks.length}
-                    </span>
-                  )}
-                </div>
-                {editingTask.subtasks && editingTask.subtasks.length > 0 && (
-                  <ul className="subtasks-edit-list">
-                    {editingTask.subtasks.map((s) => (
-                      <li key={s.id} className={`subtask-edit-item${s.done ? " done" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={!!s.done}
-                          onChange={(e) => updateSubtaskEditing(s.id, { done: e.target.checked })}
-                        />
-                        <input
-                          type="text"
-                          className="subtask-edit-input"
-                          value={s.title}
-                          onChange={(e) => updateSubtaskEditing(s.id, { title: e.target.value })}
-                        />
-                        <button
-                          type="button"
-                          className="btn-icon btn-del"
-                          onClick={() => removeSubtaskEditing(s.id)}
-                          title="Remove"
-                        >&times;</button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="subtask-add-row">
-                  <input
-                    type="text"
-                    className="subtask-add-input"
-                    placeholder="Add subtask…"
-                    value={subtaskInput}
-                    onChange={(e) => setSubtaskInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        addSubtaskEditing();
-                      }
-                    }}
-                  />
-                  <button type="button" className="btn-sm" onClick={addSubtaskEditing}>Add</button>
-                </div>
               </div>
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
@@ -1550,57 +1625,6 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              <div className="subtasks-edit">
-                <div className="subtasks-edit-header">
-                  Subtasks
-                  {editingTask.subtasks?.length > 0 && (
-                    <span className="subtasks-progress-text">
-                      {editingTask.subtasks.filter((s) => s.done).length}/{editingTask.subtasks.length}
-                    </span>
-                  )}
-                </div>
-                {editingTask.subtasks && editingTask.subtasks.length > 0 && (
-                  <ul className="subtasks-edit-list">
-                    {editingTask.subtasks.map((s) => (
-                      <li key={s.id} className={`subtask-edit-item${s.done ? " done" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={!!s.done}
-                          onChange={(e) => updateSubtaskEditing(s.id, { done: e.target.checked })}
-                        />
-                        <input
-                          type="text"
-                          className="subtask-edit-input"
-                          value={s.title}
-                          onChange={(e) => updateSubtaskEditing(s.id, { title: e.target.value })}
-                        />
-                        <button
-                          type="button"
-                          className="btn-icon btn-del"
-                          onClick={() => removeSubtaskEditing(s.id)}
-                          title="Remove"
-                        >&times;</button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="subtask-add-row">
-                  <input
-                    type="text"
-                    className="subtask-add-input"
-                    placeholder="Add subtask…"
-                    value={subtaskInput}
-                    onChange={(e) => setSubtaskInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        addSubtaskEditing();
-                      }
-                    }}
-                  />
-                  <button type="button" className="btn-sm" onClick={addSubtaskEditing}>Add</button>
-                </div>
-              </div>
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
                 <button className="btn-primary" onClick={confirmEditTask}>Save</button>
@@ -1609,84 +1633,133 @@ export default function App() {
           </div>
         )}
 
-        {/* Modal: View Task (read-only with markdown) */}
-        {viewingTask && (
-          <div className="modal-backdrop" onClick={() => setViewingTask(null)}>
-            <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-head">
-                <h3 className="view-title">{viewingTask.title}</h3>
-                <button
-                  className="btn-sm"
-                  onClick={() => {
-                    const t = viewingTask;
-                    setViewingTask(null);
-                    editTask(t);
-                  }}
-                >
-                  Edit
-                </button>
-              </div>
-              <div className="view-meta">
-                {(() => {
-                  const col = COLUMNS.find((c) => c.id === viewingTask.column);
-                  const prio = PRIORITIES.find((p) => p.id === (viewingTask.priority || "none"));
-                  return (
-                    <>
-                      <span className="view-chip" style={{ color: col?.color, borderColor: col?.color }}>
-                        {col?.label}
-                      </span>
-                      {viewingTask.priority && viewingTask.priority !== "none" && (
-                        <span className="view-chip" style={{ color: prio.color, borderColor: prio.color }}>
-                          {prio.label}
-                        </span>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-              {(viewingTask.subtasks && viewingTask.subtasks.length > 0) && (() => {
-                const sts = viewingTask.subtasks;
-                const done = sts.filter((s) => s.done).length;
-                return (
-                  <details className="subtasks-details" open>
-                    <summary>
-                      <span className="subtasks-label">Subtasks</span>
-                      <span className="subtasks-progress-text">{done}/{sts.length}</span>
-                    </summary>
-                    <ul className="subtasks-list">
-                      {sts.map((s) => (
-                        <li key={s.id} className={`subtask-item${s.done ? " done" : ""}`}>
-                          <label>
-                            <input
-                              type="checkbox"
-                              checked={!!s.done}
-                              onChange={() => toggleSubtask(viewingTask.id, s.id)}
-                            />
-                            <span>{s.title}</span>
-                          </label>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                );
-              })()}
-              {viewingTask.description ? (
-                <div className="markdown-preview">
-                  <div className="markdown">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewingTask.description}</ReactMarkdown>
+        {/* Modal: View Task (read-only with markdown + children) */}
+        {viewingTask && (() => {
+          const children = getChildren(viewingTask.id);
+          const childDone = children.filter((c) => c.column === "done").length;
+          const parentTask = viewingTask.parentId
+            ? data.tasks.find((t) => t.id === viewingTask.parentId)
+            : null;
+          const parentProject = data.projects.find((p) => p.id === viewingTask.projectId);
+          return (
+            <div className="modal-backdrop" onClick={() => setViewingTaskId(null)}>
+              <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-head">
+                  {parentTask ? (
+                    <button
+                      className="back-btn"
+                      onClick={() => setViewingTaskId(parentTask.id)}
+                      title={`Back to ${parentTask.title}`}
+                    >&larr;</button>
+                  ) : null}
+                  <h3 className="view-title">{viewingTask.title}</h3>
+                  <div className="view-actions-group">
+                    <button
+                      className="btn-sm"
+                      onClick={() => {
+                        const t = viewingTask;
+                        setViewingTaskId(null);
+                        editTask(t);
+                      }}
+                    >
+                      Edit
+                    </button>
                   </div>
                 </div>
-              ) : (
-                !(viewingTask.subtasks && viewingTask.subtasks.length > 0) && (
-                  <div className="markdown-empty">No description</div>
-                )
-              )}
-              <div className="modal-actions">
-                <button onClick={() => setViewingTask(null)}>Close</button>
+                <div className="view-meta">
+                  {(() => {
+                    const col = COLUMNS.find((c) => c.id === viewingTask.column);
+                    const prio = PRIORITIES.find((p) => p.id === (viewingTask.priority || "none"));
+                    return (
+                      <>
+                        {parentProject && (
+                          <span className="view-chip view-chip-muted">{parentProject.name}</span>
+                        )}
+                        <span className="view-chip" style={{ color: col?.color, borderColor: col?.color }}>
+                          {col?.label}
+                        </span>
+                        {viewingTask.priority && viewingTask.priority !== "none" && (
+                          <span className="view-chip" style={{ color: prio.color, borderColor: prio.color }}>
+                            {prio.label}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+                {viewingTask.description && (
+                  <div className="markdown-preview">
+                    <div className="markdown">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewingTask.description}</ReactMarkdown>
+                    </div>
+                  </div>
+                )}
+                <div className="children-section">
+                  <div className="children-header">
+                    <span className="children-label">Subtasks</span>
+                    {children.length > 0 && (
+                      <span className="subtasks-progress-text">{childDone}/{children.length}</span>
+                    )}
+                  </div>
+                  {children.length > 0 && (
+                    <ul className="children-list">
+                      {children.map((c) => {
+                        const cPrio = PRIORITIES.find((p) => p.id === (c.priority || "none"));
+                        const cCol = COLUMNS.find((col) => col.id === c.column);
+                        const grandChildren = getChildren(c.id);
+                        const gDone = grandChildren.filter((g) => g.column === "done").length;
+                        return (
+                          <li
+                            key={c.id}
+                            className={`child-item col-${c.column}${c.column === "done" ? " done" : ""}`}
+                            onClick={() => setViewingTaskId(c.id)}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={c.column === "done"}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={() => toggleTaskDone(c.id)}
+                              title="Toggle done"
+                            />
+                            <span className="child-title">{c.title}</span>
+                            <span className="child-meta">
+                              {c.priority && c.priority !== "none" && (
+                                <span className="child-prio" style={{ color: cPrio.color }}>{cPrio.label}</span>
+                              )}
+                              {c.column !== "done" && c.column !== "todo" && (
+                                <span className="child-col" style={{ color: cCol?.color }}>{cCol?.label}</span>
+                              )}
+                              {grandChildren.length > 0 && (
+                                <span className="child-count">☑ {gDone}/{grandChildren.length}</span>
+                              )}
+                              <span className="child-chevron">›</span>
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <button
+                    className="btn-sm add-subtask-btn"
+                    onClick={() => {
+                      const parent = viewingTask;
+                      setViewingTaskId(null);
+                      addSubtask(parent);
+                    }}
+                  >
+                    + Add subtask
+                  </button>
+                </div>
+                {!viewingTask.description && children.length === 0 && (
+                  <div className="markdown-empty">Empty task. Add a description or subtasks.</div>
+                )}
+                <div className="modal-actions">
+                  <button onClick={() => setViewingTaskId(null)}>Close</button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Modal: Confirm Delete Project */}
         {confirmDeleteId && (
