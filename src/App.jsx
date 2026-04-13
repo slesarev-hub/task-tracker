@@ -1054,6 +1054,32 @@ export default function App() {
           background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
           padding: 14px 16px; margin-top: 10px;
         }
+
+        /* Muted scrollbars for modal content & table */
+        .markdown-preview, .markdown table, .column-body, .board {
+          scrollbar-width: thin;
+          scrollbar-color: #2a2d38 transparent;
+        }
+        .markdown-preview::-webkit-scrollbar,
+        .markdown table::-webkit-scrollbar,
+        .column-body::-webkit-scrollbar,
+        .board::-webkit-scrollbar { width: 8px; height: 8px; }
+        .markdown-preview::-webkit-scrollbar-track,
+        .markdown table::-webkit-scrollbar-track,
+        .column-body::-webkit-scrollbar-track,
+        .board::-webkit-scrollbar-track { background: transparent; }
+        .markdown-preview::-webkit-scrollbar-thumb,
+        .markdown table::-webkit-scrollbar-thumb,
+        .column-body::-webkit-scrollbar-thumb,
+        .board::-webkit-scrollbar-thumb {
+          background: #2a2d38; border-radius: 4px;
+        }
+        .markdown-preview::-webkit-scrollbar-thumb:hover,
+        .markdown table::-webkit-scrollbar-thumb:hover,
+        .column-body::-webkit-scrollbar-thumb:hover,
+        .board::-webkit-scrollbar-thumb:hover { background: #3a3d48; }
+        .markdown-preview::-webkit-scrollbar-corner,
+        .markdown table::-webkit-scrollbar-corner { background: transparent; }
         .markdown-empty {
           padding: 20px; text-align: center; color: #6b7280; font-size: 13px;
           background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
