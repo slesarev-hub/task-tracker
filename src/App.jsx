@@ -154,7 +154,7 @@ function SortableTask({ task, onEdit, onDelete }) {
       style={{ ...style, "--priority-color": priorityDef.color }}
       {...attributes}
       {...listeners}
-      className={`task-card priority-${priority}`}
+      className={`task-card priority-${priority} col-${task.column}`}
     >
       <div className="task-title">{task.title}</div>
       {task.description && <div className="task-desc">{task.description}</div>}
@@ -722,6 +722,14 @@ export default function App() {
         .task-card.priority-urgent:hover { border-left-color: #ef4444; }
         .task-card.priority-soon:hover { border-left-color: #f59e0b; }
         .task-card:active { cursor: grabbing; }
+        .task-card.col-done, .task-card.col-cancelled {
+          opacity: 0.55; background: #14161c;
+        }
+        .task-card.col-done .task-title, .task-card.col-cancelled .task-title {
+          color: #9ca3af;
+        }
+        .task-card.col-done:hover, .task-card.col-cancelled:hover { opacity: 0.9; }
+        .task-card.col-cancelled .task-title { text-decoration: line-through; }
         .task-title { font-size: 14px; font-weight: 400; padding-right: 48px; }
         .task-desc {
           font-size: 12px; color: #6b7280; margin-top: 4px;
