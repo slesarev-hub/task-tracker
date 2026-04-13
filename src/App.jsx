@@ -109,18 +109,29 @@ const createSpreadsheet = async (token) => {
   if (!r.ok) throw new Error("Cannot create spreadsheet");
   return (await r.json()).spreadsheetId;
 };
+const parseSubtasks = (raw) => {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+};
+
 const readFromSheets = async (token, sid) => {
   const [projRes, taskRes] = await Promise.all([
     sheetsGet(token, sid, "Projects!A2:D"),
-    sheetsGet(token, sid, "Tasks!A2:I"),
+    sheetsGet(token, sid, "Tasks!A2:J"),
   ]);
   const projects = (projRes.values || []).map(([id, name, createdAt, updatedAt]) => ({
     id, name, createdAt, updatedAt,
   }));
-  const tasks = (taskRes.values || []).map(([id, projectId, title, column, order, createdAt, updatedAt, description, priority]) => ({
+  const tasks = (taskRes.values || []).map(([id, projectId, title, column, order, createdAt, updatedAt, description, priority, subtasks]) => ({
     id, projectId, title, column, order: parseFloat(order), createdAt, updatedAt,
     description: description || "",
     priority: priority || "none",
+    subtasks: parseSubtasks(subtasks),
   }));
   return { projects, tasks };
 };
@@ -132,8 +143,12 @@ const writeToSheets = async (token, sid, data) => {
     ...data.projects.map((p) => [p.id, p.name, p.createdAt, p.updatedAt]),
   ]);
   await sheetsUpdate(token, sid, "Tasks!A1", [
-    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority"],
-    ...data.tasks.map((t) => [t.id, t.projectId, t.title, t.column, String(t.order), t.createdAt, t.updatedAt, t.description || "", t.priority || "none"]),
+    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "subtasks"],
+    ...data.tasks.map((t) => [
+      t.id, t.projectId, t.title, t.column, String(t.order), t.createdAt, t.updatedAt,
+      t.description || "", t.priority || "none",
+      JSON.stringify(t.subtasks || []),
+    ]),
   ]);
 };
 
@@ -153,6 +168,8 @@ function SortableTask({ task, onEdit, onDelete, onView }) {
   // First line of description for compact preview
   const descPreview = task.description ? task.description.split("\n").find((l) => l.trim()) || "" : "";
   const hasMoreDesc = task.description && task.description.includes("\n");
+  const subtasks = task.subtasks || [];
+  const subtasksDone = subtasks.filter((s) => s.done).length;
   return (
     <div
       ref={setNodeRef}
@@ -168,11 +185,18 @@ function SortableTask({ task, onEdit, onDelete, onView }) {
           {descPreview}{hasMoreDesc && " …"}
         </div>
       )}
-      {priority !== "none" && (
-        <div className="task-priority-badge" style={{ color: priorityDef.color }}>
-          {priorityDef.label}
-        </div>
-      )}
+      <div className="task-badges">
+        {priority !== "none" && (
+          <span className="task-priority-badge" style={{ color: priorityDef.color }}>
+            {priorityDef.label}
+          </span>
+        )}
+        {subtasks.length > 0 && (
+          <span className={`task-subtasks-progress${subtasksDone === subtasks.length ? " all-done" : ""}`}>
+            ☑ {subtasksDone}/{subtasks.length}
+          </span>
+        )}
+      </div>
       <div className="task-actions" onPointerDown={(e) => e.stopPropagation()}>
         <button className="btn-icon" onClick={(e) => { e.stopPropagation(); onEdit(task); }} title="Edit">&#9998;</button>
         <button className="btn-icon btn-del" onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} title="Delete">&times;</button>
@@ -223,6 +247,7 @@ export default function App() {
   const [editingTask, setEditingTask] = useState(null);
   const [viewingTask, setViewingTask] = useState(null);
   const [editPreview, setEditPreview] = useState(false);
+  const [subtaskInput, setSubtaskInput] = useState("");
   const [activeId, setActiveId] = useState(null);
 
   // Mobile & online state
@@ -432,7 +457,8 @@ export default function App() {
     setModal("addTask");
     setModalValue("");
     setModalDesc("");
-    setEditingTask({ column: columnId, priority: "none" });
+    setSubtaskInput("");
+    setEditingTask({ column: columnId, priority: "none", subtasks: [] });
   };
   const confirmAddTask = () => {
     if (!modalValue.trim()) return;
@@ -448,6 +474,7 @@ export default function App() {
       description: modalDesc.trim(),
       column: editingTask.column,
       priority: editingTask.priority || "none",
+      subtasks: editingTask.subtasks || [],
       order: maxOrder + 1,
       createdAt: t,
       updatedAt: t,
@@ -460,10 +487,53 @@ export default function App() {
     setModal("editTask");
     setModalValue(task.title);
     setModalDesc(task.description || "");
-    setEditingTask({ ...task, priority: task.priority || "none" });
+    setEditingTask({ ...task, priority: task.priority || "none", subtasks: task.subtasks || [] });
+    setSubtaskInput("");
     setEditPreview(false);
   };
   const viewTask = (task) => setViewingTask(task);
+
+  // Subtask helpers
+  const addSubtaskEditing = () => {
+    const v = subtaskInput.trim();
+    if (!v || !editingTask) return;
+    setEditingTask({
+      ...editingTask,
+      subtasks: [...(editingTask.subtasks || []), { id: uid(), title: v, done: false }],
+    });
+    setSubtaskInput("");
+  };
+  const updateSubtaskEditing = (sid, patch) => {
+    setEditingTask({
+      ...editingTask,
+      subtasks: (editingTask.subtasks || []).map((s) => (s.id === sid ? { ...s, ...patch } : s)),
+    });
+  };
+  const removeSubtaskEditing = (sid) => {
+    setEditingTask({
+      ...editingTask,
+      subtasks: (editingTask.subtasks || []).filter((s) => s.id !== sid),
+    });
+  };
+  // Toggle subtask on an existing task (from view modal) — persists immediately
+  const toggleSubtask = (taskId, subtaskId) => {
+    const updatedTasks = data.tasks.map((t) =>
+      t.id === taskId
+        ? {
+            ...t,
+            subtasks: (t.subtasks || []).map((s) =>
+              s.id === subtaskId ? { ...s, done: !s.done } : s
+            ),
+            updatedAt: now(),
+          }
+        : t
+    );
+    save({ ...data, tasks: updatedTasks });
+    if (viewingTask?.id === taskId) {
+      const newTask = updatedTasks.find((t) => t.id === taskId);
+      if (newTask) setViewingTask(newTask);
+    }
+  };
   const confirmEditTask = () => {
     if (!modalValue.trim()) return;
     const originalTask = data.tasks.find((t) => t.id === editingTask.id);
@@ -487,6 +557,7 @@ export default function App() {
               description: modalDesc.trim(),
               column: editingTask.column,
               priority: editingTask.priority || "none",
+              subtasks: editingTask.subtasks || [],
               order: newOrder,
               updatedAt: now(),
             }
@@ -824,9 +895,91 @@ export default function App() {
           font-size: 12px; color: #6b7280; margin-top: 4px;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
+        .task-badges {
+          display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px;
+          align-items: center;
+        }
         .task-priority-badge {
-          display: inline-block; margin-top: 6px; font-size: 10px;
-          font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+          font-size: 10px; font-weight: 600;
+          text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .task-subtasks-progress {
+          font-size: 11px; color: #6b7280; font-weight: 500;
+          display: inline-flex; align-items: center; gap: 3px;
+        }
+        .task-subtasks-progress.all-done { color: #22c55e; }
+
+        /* Subtasks in view modal */
+        .subtasks-details {
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          padding: 10px 14px; margin-top: 4px;
+        }
+        .subtasks-details summary {
+          cursor: pointer; list-style: none;
+          display: flex; align-items: center; justify-content: space-between;
+          font-size: 12px; color: #9ca3af; font-weight: 600;
+          text-transform: uppercase; letter-spacing: 0.5px;
+          user-select: none;
+        }
+        .subtasks-details summary::-webkit-details-marker { display: none; }
+        .subtasks-details summary::before {
+          content: "▶"; font-size: 9px; margin-right: 8px;
+          transition: transform 0.15s; color: #6b7280;
+        }
+        .subtasks-details[open] summary::before { transform: rotate(90deg); }
+        .subtasks-label { flex: 1; }
+        .subtasks-progress-text {
+          font-size: 11px; color: #6b7280; font-weight: 500;
+          background: #1e2028; padding: 2px 8px; border-radius: 10px;
+        }
+        .subtasks-list {
+          list-style: none; padding: 10px 0 0; margin: 0;
+          display: flex; flex-direction: column; gap: 6px;
+        }
+        .subtask-item label {
+          display: flex; align-items: center; gap: 8px;
+          cursor: pointer; font-size: 13px; color: #e8eaf0;
+        }
+        .subtask-item input[type="checkbox"] {
+          width: 16px; height: 16px; cursor: pointer; accent-color: #3b82f6;
+          flex-shrink: 0;
+        }
+        .subtask-item.done span { color: #6b7280; text-decoration: line-through; }
+
+        /* Subtasks in edit modal */
+        .subtasks-edit {
+          margin-top: 10px; padding: 10px 12px;
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+        }
+        .subtasks-edit-header {
+          display: flex; align-items: center; justify-content: space-between;
+          font-size: 12px; color: #9ca3af; font-weight: 600;
+          text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+        }
+        .subtasks-edit-list {
+          list-style: none; padding: 0; margin: 0 0 8px;
+          display: flex; flex-direction: column; gap: 6px;
+        }
+        .subtask-edit-item {
+          display: flex; gap: 8px; align-items: center;
+        }
+        .subtask-edit-item input[type="checkbox"] {
+          width: 16px; height: 16px; cursor: pointer; accent-color: #3b82f6;
+          flex-shrink: 0;
+        }
+        .subtask-edit-input {
+          flex: 1; width: auto !important; padding: 6px 10px !important;
+          font-size: 13px !important; margin: 0 !important;
+        }
+        .subtask-edit-item.done .subtask-edit-input {
+          color: #6b7280; text-decoration: line-through;
+        }
+        .subtask-add-row {
+          display: flex; gap: 6px;
+        }
+        .subtask-add-input {
+          flex: 1; width: auto !important; padding: 6px 10px !important;
+          font-size: 13px !important; margin: 0 !important;
         }
 
         /* Priority selector in modal */
@@ -1252,6 +1405,57 @@ export default function App() {
                   </button>
                 ))}
               </div>
+              <div className="subtasks-edit">
+                <div className="subtasks-edit-header">
+                  Subtasks
+                  {editingTask.subtasks?.length > 0 && (
+                    <span className="subtasks-progress-text">
+                      {editingTask.subtasks.filter((s) => s.done).length}/{editingTask.subtasks.length}
+                    </span>
+                  )}
+                </div>
+                {editingTask.subtasks && editingTask.subtasks.length > 0 && (
+                  <ul className="subtasks-edit-list">
+                    {editingTask.subtasks.map((s) => (
+                      <li key={s.id} className={`subtask-edit-item${s.done ? " done" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={!!s.done}
+                          onChange={(e) => updateSubtaskEditing(s.id, { done: e.target.checked })}
+                        />
+                        <input
+                          type="text"
+                          className="subtask-edit-input"
+                          value={s.title}
+                          onChange={(e) => updateSubtaskEditing(s.id, { title: e.target.value })}
+                        />
+                        <button
+                          type="button"
+                          className="btn-icon btn-del"
+                          onClick={() => removeSubtaskEditing(s.id)}
+                          title="Remove"
+                        >&times;</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="subtask-add-row">
+                  <input
+                    type="text"
+                    className="subtask-add-input"
+                    placeholder="Add subtask…"
+                    value={subtaskInput}
+                    onChange={(e) => setSubtaskInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        addSubtaskEditing();
+                      }
+                    }}
+                  />
+                  <button type="button" className="btn-sm" onClick={addSubtaskEditing}>Add</button>
+                </div>
+              </div>
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
                 <button className="btn-primary" onClick={confirmAddTask}>Add</button>
@@ -1320,6 +1524,57 @@ export default function App() {
                   </button>
                 ))}
               </div>
+              <div className="subtasks-edit">
+                <div className="subtasks-edit-header">
+                  Subtasks
+                  {editingTask.subtasks?.length > 0 && (
+                    <span className="subtasks-progress-text">
+                      {editingTask.subtasks.filter((s) => s.done).length}/{editingTask.subtasks.length}
+                    </span>
+                  )}
+                </div>
+                {editingTask.subtasks && editingTask.subtasks.length > 0 && (
+                  <ul className="subtasks-edit-list">
+                    {editingTask.subtasks.map((s) => (
+                      <li key={s.id} className={`subtask-edit-item${s.done ? " done" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={!!s.done}
+                          onChange={(e) => updateSubtaskEditing(s.id, { done: e.target.checked })}
+                        />
+                        <input
+                          type="text"
+                          className="subtask-edit-input"
+                          value={s.title}
+                          onChange={(e) => updateSubtaskEditing(s.id, { title: e.target.value })}
+                        />
+                        <button
+                          type="button"
+                          className="btn-icon btn-del"
+                          onClick={() => removeSubtaskEditing(s.id)}
+                          title="Remove"
+                        >&times;</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="subtask-add-row">
+                  <input
+                    type="text"
+                    className="subtask-add-input"
+                    placeholder="Add subtask…"
+                    value={subtaskInput}
+                    onChange={(e) => setSubtaskInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        addSubtaskEditing();
+                      }
+                    }}
+                  />
+                  <button type="button" className="btn-sm" onClick={addSubtaskEditing}>Add</button>
+                </div>
+              </div>
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
                 <button className="btn-primary" onClick={confirmEditTask}>Save</button>
@@ -1363,6 +1618,32 @@ export default function App() {
                   );
                 })()}
               </div>
+              {(viewingTask.subtasks && viewingTask.subtasks.length > 0) && (() => {
+                const sts = viewingTask.subtasks;
+                const done = sts.filter((s) => s.done).length;
+                return (
+                  <details className="subtasks-details" open>
+                    <summary>
+                      <span className="subtasks-label">Subtasks</span>
+                      <span className="subtasks-progress-text">{done}/{sts.length}</span>
+                    </summary>
+                    <ul className="subtasks-list">
+                      {sts.map((s) => (
+                        <li key={s.id} className={`subtask-item${s.done ? " done" : ""}`}>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={!!s.done}
+                              onChange={() => toggleSubtask(viewingTask.id, s.id)}
+                            />
+                            <span>{s.title}</span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                );
+              })()}
               {viewingTask.description ? (
                 <div className="markdown-preview">
                   <div className="markdown">
@@ -1370,7 +1651,9 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <div className="markdown-empty">No description</div>
+                !(viewingTask.subtasks && viewingTask.subtasks.length > 0) && (
+                  <div className="markdown-empty">No description</div>
+                )
               )}
               <div className="modal-actions">
                 <button onClick={() => setViewingTask(null)}>Close</button>
