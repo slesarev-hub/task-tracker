@@ -282,18 +282,45 @@ function Column({ col, tasks, onEdit, onDelete, onAdd, onView, childStats }) {
   );
 }
 
+// ── Hash routing ─────────────────────────────────────────────────────────────
+const parseHash = () => {
+  const h = (typeof window !== "undefined" ? window.location.hash.slice(1) : "") || "/";
+  const m = h.match(/^\/p\/([^/?#]+)(?:\/t\/([^/?#]+))?$/);
+  if (m) return { view: "board", activeProjectId: m[1], viewingTaskId: m[2] || null };
+  return { view: "projects", activeProjectId: null, viewingTaskId: null };
+};
+const buildHash = (view, activeProjectId, viewingTaskId) => {
+  if (view === "board" && activeProjectId) {
+    return viewingTaskId
+      ? `#/p/${activeProjectId}/t/${viewingTaskId}`
+      : `#/p/${activeProjectId}`;
+  }
+  return "#/";
+};
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [data, setData] = useState({ projects: [], tasks: [] });
-  const [view, setView] = useState("projects"); // "projects" | "board"
-  const [activeProjectId, setActiveProjectId] = useState(null);
+  const [data, setData] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return { projects: [], tasks: [] };
+      const parsed = JSON.parse(raw);
+      return { ...parsed, tasks: migrateTasks(parsed.tasks) };
+    } catch {
+      return { projects: [], tasks: [] };
+    }
+  });
+  const initialRoute = parseHash();
+  const [view, setView] = useState(initialRoute.view); // "projects" | "board"
+  const [activeProjectId, setActiveProjectId] = useState(initialRoute.activeProjectId);
+  const [viewingTaskId, setViewingTaskId] = useState(initialRoute.viewingTaskId);
   const [modal, setModal] = useState(null);
   const [modalValue, setModalValue] = useState("");
   const [modalDesc, setModalDesc] = useState("");
   const [editingTask, setEditingTask] = useState(null);
-  const [viewingTaskId, setViewingTaskId] = useState(null);
   const [editPreview, setEditPreview] = useState(false);
   const [activeId, setActiveId] = useState(null);
+  const skipHashSync = useRef(false);
 
   // Mobile & online state
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -314,24 +341,58 @@ export default function App() {
   const refreshTimer = useRef(null);
   const feedRef = useRef(null);
 
-  // Load data from localStorage
+  // Persist migrated localStorage data once (if legacy embedded subtasks were present)
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
-      // Run migration: flatten any embedded subtasks into children with parentId
-      const migrated = { ...parsed, tasks: migrateTasks(parsed.tasks) };
-      setData(migrated);
-      // Persist the migrated form so we don't re-migrate on every load
       const wasLegacy = (parsed.tasks || []).some(
         (t) => Array.isArray(t.subtasks) && t.subtasks.length > 0
       );
       if (wasLegacy) {
-        try { localStorage.setItem(LS_KEY, JSON.stringify(migrated)); } catch {}
+        localStorage.setItem(LS_KEY, JSON.stringify({ ...parsed, tasks: migrateTasks(parsed.tasks) }));
       }
     } catch {}
   }, []);
+
+  // ── Route persistence: sync state ↔ URL hash ─────────────────────────────
+  // state → hash
+  useEffect(() => {
+    const desired = buildHash(view, activeProjectId, viewingTaskId);
+    if (window.location.hash !== desired && !(desired === "#/" && window.location.hash === "")) {
+      skipHashSync.current = true;
+      window.location.hash = desired;
+    }
+  }, [view, activeProjectId, viewingTaskId]);
+  // hash → state (browser back/forward)
+  useEffect(() => {
+    const onHashChange = () => {
+      if (skipHashSync.current) {
+        skipHashSync.current = false;
+        return;
+      }
+      const s = parseHash();
+      setView(s.view);
+      setActiveProjectId(s.activeProjectId);
+      setViewingTaskId(s.viewingTaskId);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  // Safeguard: if URL references a missing project or task, fall back cleanly
+  useEffect(() => {
+    if (view === "board" && activeProjectId && !data.projects.find((p) => p.id === activeProjectId)) {
+      setView("projects");
+      setActiveProjectId(null);
+      setViewingTaskId(null);
+      return;
+    }
+    if (viewingTaskId && !data.tasks.find((t) => t.id === viewingTaskId)) {
+      setViewingTaskId(null);
+    }
+  }, [view, activeProjectId, viewingTaskId, data.projects, data.tasks]);
 
   // Online/offline detection + auto-sync on reconnect
   useEffect(() => {
