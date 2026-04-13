@@ -145,6 +145,48 @@ const sheetsUpdate = async (token, sid, range, values) => {
   );
   if (!r.ok) throw new Error(`Sheets update failed: ${r.status}`);
 };
+const sheetsBatchUpdate = async (token, sid, data) => {
+  if (!data.length) return;
+  const r = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ valueInputOption: "RAW", data }),
+    }
+  );
+  if (!r.ok) throw new Error(`Sheets batchUpdate failed: ${r.status}`);
+  return r.json();
+};
+const sheetsAppend = async (token, sid, range, values) => {
+  const r = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    }
+  );
+  if (!r.ok) throw new Error(`Sheets append failed: ${r.status}`);
+  return r.json();
+};
+
+// Row converters — single source of truth for sheet column layouts
+const projectToRow = (p) => [p.id || "", p.name || "", p.createdAt || "", p.updatedAt || ""];
+const taskToRow = (t) => [
+  t.id || "",
+  t.projectId || "",
+  t.title || "",
+  t.column || "",
+  String(t.order ?? 0),
+  t.createdAt || "",
+  t.updatedAt || "",
+  t.description || "",
+  t.priority || "none",
+  t.parentId || "",
+];
+const PROJECTS_HEADER = ["id", "name", "createdAt", "updatedAt"];
+const TASKS_HEADER = ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "parentId"];
 const createSpreadsheet = async (token) => {
   const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
     method: "POST",
@@ -188,15 +230,25 @@ const migrateTasks = (rawTasks) => {
   return out;
 };
 
+// Read sheets and return data plus per-id → row-index maps.
+// Empty rows (no id) are skipped but their row slot is not reused.
 const readFromSheets = async (token, sid) => {
   const [projRes, taskRes] = await Promise.all([
     sheetsGet(token, sid, "Projects!A2:D"),
     sheetsGet(token, sid, "Tasks!A2:J"),
   ]);
-  const projects = (projRes.values || []).map(([id, name, createdAt, updatedAt]) => ({
-    id, name, createdAt, updatedAt,
-  }));
-  const tasks = (taskRes.values || []).map((row) => {
+  const projects = [];
+  const projRowMap = new Map();
+  (projRes.values || []).forEach((row, idx) => {
+    if (!row || !row[0]) return;
+    const [id, name, createdAt, updatedAt] = row;
+    projects.push({ id, name, createdAt, updatedAt });
+    projRowMap.set(id, idx + 2); // row 1 is header, data starts at row 2
+  });
+  const tasksRaw = [];
+  const taskRowMap = new Map();
+  (taskRes.values || []).forEach((row, idx) => {
+    if (!row || !row[0]) return;
     const [id, projectId, title, column, order, createdAt, updatedAt, description, priority, colJ] = row;
     // Column J may contain legacy subtasks JSON or new parentId string
     let parentId = null;
@@ -212,32 +264,113 @@ const readFromSheets = async (token, sid) => {
         parentId = trimmed;
       }
     }
-    return {
+    tasksRaw.push({
       id, projectId, title, column, order: parseFloat(order),
       createdAt, updatedAt,
       description: description || "",
       priority: priority || "none",
       parentId,
       ...(legacySubtasks ? { subtasks: legacySubtasks } : {}),
-    };
+    });
+    taskRowMap.set(id, idx + 2);
   });
-  return { projects, tasks: migrateTasks(tasks) };
+  // migrateTasks may add tasks (legacy subtask children). Those don't yet have
+  // sheet rows — they'll be appended on the next diff push.
+  const tasks = migrateTasks(tasksRaw);
+  return { projects, tasks, rowMaps: { projects: projRowMap, tasks: taskRowMap } };
 };
+
+// Full rewrite: only used for first-time init and Force push escape hatch.
 const writeToSheets = async (token, sid, data) => {
   await sheetsClear(token, sid, "Projects!A1:Z");
   await sheetsClear(token, sid, "Tasks!A1:Z");
   await sheetsUpdate(token, sid, "Projects!A1", [
-    ["id", "name", "createdAt", "updatedAt"],
-    ...data.projects.map((p) => [p.id, p.name, p.createdAt, p.updatedAt]),
+    PROJECTS_HEADER,
+    ...data.projects.map(projectToRow),
   ]);
   await sheetsUpdate(token, sid, "Tasks!A1", [
-    ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "parentId"],
-    ...data.tasks.map((t) => [
-      t.id, t.projectId, t.title, t.column, String(t.order), t.createdAt, t.updatedAt,
-      t.description || "", t.priority || "none",
-      t.parentId || "",
-    ]),
+    TASKS_HEADER,
+    ...data.tasks.map(taskToRow),
   ]);
+};
+
+// Push only the diff between a prev baseline and the next state.
+// rowMap maps id → sheet row number (1-based); it is mutated in place as
+// appends return their assigned row. The caller must have already populated
+// rowMap via a successful readFromSheets or force rewrite.
+const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
+  const batchData = [
+    // Always keep the header in sync — cheap and idempotent.
+    { range: "Projects!A1:D1", values: [PROJECTS_HEADER] },
+    { range: "Tasks!A1:J1", values: [TASKS_HEADER] },
+  ];
+  const appendProjects = [];
+  const appendTasks = [];
+
+  const diffItems = (prevItems, nextItems, sheetName, cols, toRow, isChanged, map, appendBucket) => {
+    const prevById = new Map((prevItems || []).map((i) => [i.id, i]));
+    const nextById = new Map((nextItems || []).map((i) => [i.id, i]));
+    const emptyRow = new Array(cols).fill("");
+    const allIds = new Set([...prevById.keys(), ...nextById.keys()]);
+    for (const id of allIds) {
+      const p = prevById.get(id);
+      const n = nextById.get(id);
+      const row = map.get(id);
+      const lastCol = String.fromCharCode("A".charCodeAt(0) + cols - 1);
+      if (n && !p) {
+        if (row) {
+          batchData.push({ range: `${sheetName}!A${row}:${lastCol}${row}`, values: [toRow(n)] });
+        } else {
+          appendBucket.push(n);
+        }
+      } else if (p && !n) {
+        if (row) {
+          batchData.push({ range: `${sheetName}!A${row}:${lastCol}${row}`, values: [emptyRow] });
+          map.delete(id);
+        }
+      } else if (p && n) {
+        if (isChanged(p, n)) {
+          if (row) {
+            batchData.push({ range: `${sheetName}!A${row}:${lastCol}${row}`, values: [toRow(n)] });
+          } else {
+            appendBucket.push(n);
+          }
+        }
+      }
+    }
+  };
+
+  const projectChanged = (a, b) =>
+    a.updatedAt !== b.updatedAt || a.name !== b.name;
+  const taskChanged = (a, b) =>
+    a.updatedAt !== b.updatedAt ||
+    (a.parentId || "") !== (b.parentId || "") ||
+    a.column !== b.column ||
+    a.order !== b.order;
+
+  diffItems(prev.projects, next.projects, "Projects", 4, projectToRow, projectChanged, rowMap.projects, appendProjects);
+  diffItems(prev.tasks, next.tasks, "Tasks", 10, taskToRow, taskChanged, rowMap.tasks, appendTasks);
+
+  if (batchData.length > 2) {
+    // More than just headers → actually write
+    await sheetsBatchUpdate(token, sid, batchData);
+  } else {
+    // Only headers — still write them once to keep the sheet labelled
+    await sheetsBatchUpdate(token, sid, batchData);
+  }
+
+  for (const p of appendProjects) {
+    const res = await sheetsAppend(token, sid, "Projects!A1:D1", [projectToRow(p)]);
+    const rng = res?.updates?.updatedRange || "";
+    const m = rng.match(/!A(\d+)/);
+    if (m) rowMap.projects.set(p.id, parseInt(m[1], 10));
+  }
+  for (const t of appendTasks) {
+    const res = await sheetsAppend(token, sid, "Tasks!A1:J1", [taskToRow(t)]);
+    const rng = res?.updates?.updatedRange || "";
+    const m = rng.match(/!A(\d+)/);
+    if (m) rowMap.tasks.set(t.id, parseInt(m[1], 10));
+  }
 };
 
 // ── Task Card body (shared by Sortable and Static wrappers) ──────────────────
@@ -477,6 +610,13 @@ export default function App() {
   const refreshTimer = useRef(null);
   const feedRef = useRef(null);
   const syncFromSheetsRef = useRef(null);
+  // Per-row sync bookkeeping
+  const rowMapRef = useRef({ projects: new Map(), tasks: new Map() });
+  const prevSyncedRef = useRef({ projects: [], tasks: [] });
+  const syncedOnceRef = useRef(false);
+  const pushTimerRef = useRef(null);
+  const pendingSaveRef = useRef(null);
+  const pushInFlightRef = useRef(false);
 
   // Persist migrated localStorage data once (if legacy embedded subtasks were present)
   useEffect(() => {
@@ -549,6 +689,40 @@ export default function App() {
     };
   }, [token, sheetId]);
 
+  // Debounced, serialized diff-push flush.
+  // Multiple rapid save() calls coalesce into a single push of the latest state.
+  // Only one push runs at a time; if a new save arrives mid-flight, it reruns
+  // after the current push finishes.
+  const flushPush = useCallback(async () => {
+    if (!token || !sheetId) return;
+    if (!syncedOnceRef.current) return; // wait for first pull-sync
+    if (pushInFlightRef.current) {
+      if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+      pushTimerRef.current = setTimeout(flushPush, 500);
+      return;
+    }
+    const toSave = pendingSaveRef.current;
+    if (!toSave) return;
+    pendingSaveRef.current = null;
+    pushInFlightRef.current = true;
+    setSyncStatus("syncing");
+    try {
+      await diffPushToSheets(token, sheetId, prevSyncedRef.current, toSave, rowMapRef.current);
+      prevSyncedRef.current = toSave;
+      try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
+      setSyncStatus("ok");
+    } catch (e) {
+      console.error("diffPushToSheets failed", e);
+      setSyncStatus("error");
+    } finally {
+      pushInFlightRef.current = false;
+      if (pendingSaveRef.current) {
+        if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+        pushTimerRef.current = setTimeout(flushPush, 500);
+      }
+    }
+  }, [token, sheetId]);
+
   // Save helper
   const save = useCallback(
     (next) => {
@@ -571,17 +745,13 @@ export default function App() {
       }
       setData(next);
       try { localStorage.setItem(LS_KEY, JSON.stringify(next)); } catch {}
-      if (token && sheetId) {
-        setSyncStatus("syncing");
-        writeToSheets(token, sheetId, next)
-          .then(() => {
-            try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
-            setSyncStatus("ok");
-          })
-          .catch(() => setSyncStatus("error"));
+      if (token && sheetId && syncedOnceRef.current) {
+        pendingSaveRef.current = next;
+        if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+        pushTimerRef.current = setTimeout(flushPush, 500);
       }
     },
-    [token, sheetId]
+    [token, sheetId, flushPush]
   );
 
   // ── Google Auth ──────────────────────────────────────────────────────────
@@ -701,6 +871,14 @@ export default function App() {
     setSyncStatus("syncing");
     try {
       await writeToSheets(token, sheetId, dataRef.current);
+      // Full rewrite — rebuild rowMap deterministically from the order we just wrote
+      const projRows = new Map();
+      (dataRef.current.projects || []).forEach((p, i) => projRows.set(p.id, i + 2));
+      const taskRows = new Map();
+      (dataRef.current.tasks || []).forEach((t, i) => taskRows.set(t.id, i + 2));
+      rowMapRef.current = { projects: projRows, tasks: taskRows };
+      prevSyncedRef.current = dataRef.current;
+      syncedOnceRef.current = true;
       try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
       setSyncStatus("ok");
     } catch {
@@ -713,16 +891,20 @@ export default function App() {
     setSyncStatus("syncing");
     try {
       const remote = await readFromSheets(token, sheetId);
-      const lastSync = parseInt(localStorage.getItem(LS_LAST_SYNC) || "0", 10);
-      const merged = mergeData(dataRef.current, remote, lastSync);
-      // Persist merged state locally
+      // Freshly-pulled rowMaps are the source of truth
+      rowMapRef.current = remote.rowMaps;
+      const remoteData = { projects: remote.projects, tasks: remote.tasks };
+      const merged = mergeData(dataRef.current, remoteData);
       setData(merged);
       try { localStorage.setItem(LS_KEY, JSON.stringify(merged)); } catch {}
-      // Push merged state to remote so both sides converge
-      await writeToSheets(token, sheetId, merged);
+      // Push only the diff between pulled remote and merged state
+      await diffPushToSheets(token, sheetId, remoteData, merged, rowMapRef.current);
+      prevSyncedRef.current = merged;
+      syncedOnceRef.current = true;
       try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
       setSyncStatus("ok");
-    } catch {
+    } catch (e) {
+      console.error("syncFromSheets failed", e);
       setSyncStatus("error");
     }
   };
