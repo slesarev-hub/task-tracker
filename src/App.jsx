@@ -837,6 +837,7 @@ export default function App() {
               description: modalDesc.trim(),
               column: editingTask.column,
               priority: editingTask.priority || "none",
+              parentId: editingTask.parentId || null,
               order: newOrder,
               updatedAt: now(),
             }
@@ -1891,6 +1892,32 @@ export default function App() {
                 {COLUMNS.map((c) => (
                   <option key={c.id} value={c.id}>{c.label}</option>
                 ))}
+              </select>
+              <select
+                value={editingTask.parentId || ""}
+                onChange={(e) => setEditingTask({ ...editingTask, parentId: e.target.value || null })}
+              >
+                <option value="">— top-level (no parent)</option>
+                {(() => {
+                  // Collect all descendants of editingTask to exclude (prevent cycles)
+                  const forbidden = new Set([editingTask.id]);
+                  let changed = true;
+                  while (changed) {
+                    changed = false;
+                    for (const t of data.tasks) {
+                      if (t.parentId && forbidden.has(t.parentId) && !forbidden.has(t.id)) {
+                        forbidden.add(t.id);
+                        changed = true;
+                      }
+                    }
+                  }
+                  return data.tasks
+                    .filter((t) => t.projectId === editingTask.projectId && !forbidden.has(t.id))
+                    .sort((a, b) => a.title.localeCompare(b.title))
+                    .map((t) => (
+                      <option key={t.id} value={t.id}>{t.title}</option>
+                    ));
+                })()}
               </select>
               <div className="priority-selector">
                 {PRIORITIES.map((p) => (
