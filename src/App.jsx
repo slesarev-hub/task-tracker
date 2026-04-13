@@ -16,6 +16,8 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const LS_KEY = "task-tracker-v1";
@@ -136,7 +138,7 @@ const writeToSheets = async (token, sid, data) => {
 };
 
 // ── Sortable Task Card ───────────────────────────────────────────────────────
-function SortableTask({ task, onEdit, onDelete }) {
+function SortableTask({ task, onEdit, onDelete, onView }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: { type: "task", task },
@@ -148,6 +150,9 @@ function SortableTask({ task, onEdit, onDelete }) {
   };
   const priority = task.priority || "none";
   const priorityDef = PRIORITIES.find((p) => p.id === priority);
+  // First line of description for compact preview
+  const descPreview = task.description ? task.description.split("\n").find((l) => l.trim()) || "" : "";
+  const hasMoreDesc = task.description && task.description.includes("\n");
   return (
     <div
       ref={setNodeRef}
@@ -155,17 +160,22 @@ function SortableTask({ task, onEdit, onDelete }) {
       {...attributes}
       {...listeners}
       className={`task-card priority-${priority} col-${task.column}`}
+      onClick={() => onView(task)}
     >
       <div className="task-title">{task.title}</div>
-      {task.description && <div className="task-desc">{task.description}</div>}
+      {descPreview && (
+        <div className="task-desc">
+          {descPreview}{hasMoreDesc && " …"}
+        </div>
+      )}
       {priority !== "none" && (
         <div className="task-priority-badge" style={{ color: priorityDef.color }}>
           {priorityDef.label}
         </div>
       )}
       <div className="task-actions" onPointerDown={(e) => e.stopPropagation()}>
-        <button className="btn-icon" onClick={() => onEdit(task)} title="Edit">&#9998;</button>
-        <button className="btn-icon btn-del" onClick={() => onDelete(task.id)} title="Delete">&times;</button>
+        <button className="btn-icon" onClick={(e) => { e.stopPropagation(); onEdit(task); }} title="Edit">&#9998;</button>
+        <button className="btn-icon btn-del" onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} title="Delete">&times;</button>
       </div>
     </div>
   );
@@ -180,7 +190,7 @@ function ColumnDropZone({ columnId, children }) {
   return <div ref={setNodeRef} style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minHeight: 60 }}>{children}</div>;
 }
 
-function Column({ col, tasks, onEdit, onDelete, onAdd }) {
+function Column({ col, tasks, onEdit, onDelete, onAdd, onView }) {
   const taskIds = tasks.map((t) => t.id);
   return (
     <div className="column">
@@ -192,7 +202,7 @@ function Column({ col, tasks, onEdit, onDelete, onAdd }) {
         <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
           <ColumnDropZone columnId={col.id}>
             {tasks.map((t) => (
-              <SortableTask key={t.id} task={t} onEdit={onEdit} onDelete={onDelete} />
+              <SortableTask key={t.id} task={t} onEdit={onEdit} onDelete={onDelete} onView={onView} />
             ))}
           </ColumnDropZone>
         </SortableContext>
@@ -211,6 +221,8 @@ export default function App() {
   const [modalValue, setModalValue] = useState("");
   const [modalDesc, setModalDesc] = useState("");
   const [editingTask, setEditingTask] = useState(null);
+  const [viewingTask, setViewingTask] = useState(null);
+  const [editPreview, setEditPreview] = useState(false);
   const [activeId, setActiveId] = useState(null);
 
   // Mobile & online state
@@ -449,7 +461,9 @@ export default function App() {
     setModalValue(task.title);
     setModalDesc(task.description || "");
     setEditingTask({ ...task, priority: task.priority || "none" });
+    setEditPreview(false);
   };
+  const viewTask = (task) => setViewingTask(task);
   const confirmEditTask = () => {
     if (!modalValue.trim()) return;
     const originalTask = data.tasks.find((t) => t.id === editingTask.id);
@@ -808,7 +822,7 @@ export default function App() {
         .task-title { font-size: 14px; font-weight: 400; padding-right: 48px; }
         .task-desc {
           font-size: 12px; color: #6b7280; margin-top: 4px;
-          white-space: pre-wrap; word-break: break-word;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .task-priority-badge {
           display: inline-block; margin-top: 6px; font-size: 10px;
@@ -864,6 +878,74 @@ export default function App() {
           padding: 24px; width: 100%; max-width: 400px;
         }
         .modal h3 { font-size: 16px; margin-bottom: 16px; }
+        .modal-wide { max-width: 760px; max-height: 90vh; display: flex; flex-direction: column; }
+        .modal-wide h3 { margin-bottom: 0; }
+        .modal-head {
+          display: flex; align-items: center; justify-content: space-between;
+          gap: 12px; margin-bottom: 14px;
+        }
+        .view-title {
+          font-size: 16px; flex: 1; word-break: break-word;
+        }
+        .view-meta {
+          display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px;
+        }
+        .view-chip {
+          font-size: 10px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.5px; padding: 3px 8px; border-radius: 10px;
+          border: 1px solid;
+        }
+        .textarea-big { min-height: 220px !important; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+        .markdown-preview {
+          flex: 1; min-height: 220px; max-height: 60vh; overflow: auto;
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          padding: 14px 16px; margin-top: 10px;
+        }
+        .markdown-empty {
+          padding: 20px; text-align: center; color: #6b7280; font-size: 13px;
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          margin-top: 10px;
+        }
+        .markdown { font-size: 13px; line-height: 1.5; color: #e8eaf0; }
+        .markdown > *:first-child { margin-top: 0; }
+        .markdown > *:last-child { margin-bottom: 0; }
+        .markdown p { margin: 0 0 10px; }
+        .markdown h1, .markdown h2, .markdown h3, .markdown h4 {
+          margin: 14px 0 8px; font-weight: 600;
+        }
+        .markdown h1 { font-size: 18px; }
+        .markdown h2 { font-size: 16px; }
+        .markdown h3 { font-size: 14px; }
+        .markdown ul, .markdown ol { margin: 0 0 10px 22px; }
+        .markdown li { margin: 2px 0; }
+        .markdown code {
+          background: #1e2028; padding: 2px 6px; border-radius: 4px;
+          font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+        }
+        .markdown pre {
+          background: #1e2028; padding: 10px 12px; border-radius: 6px;
+          overflow-x: auto; margin: 0 0 10px;
+        }
+        .markdown pre code { background: none; padding: 0; }
+        .markdown a { color: #3b82f6; text-decoration: none; }
+        .markdown a:hover { text-decoration: underline; }
+        .markdown blockquote {
+          border-left: 3px solid #2a2d38; padding-left: 10px; color: #9ca3af;
+          margin: 0 0 10px;
+        }
+        .markdown del { color: #6b7280; }
+        .markdown hr { border: none; border-top: 1px solid #2a2d38; margin: 14px 0; }
+        .markdown table {
+          border-collapse: collapse; margin: 0 0 10px;
+          display: block; max-width: 100%; overflow-x: auto;
+          font-size: 12px;
+        }
+        .markdown th, .markdown td {
+          border: 1px solid #2a2d38; padding: 5px 10px;
+          text-align: left; white-space: nowrap;
+        }
+        .markdown th { background: #1e2028; font-weight: 600; }
+        .markdown tr:nth-child(even) td { background: #14161c; }
         .modal input, .modal textarea, .modal select {
           width: 100%; background: #0d0f14; border: 1px solid #2a2d38;
           border-radius: 6px; padding: 10px 12px; color: #e8eaf0;
@@ -1088,6 +1170,7 @@ export default function App() {
                     onEdit={editTask}
                     onDelete={deleteTask}
                     onAdd={addTask}
+                    onView={viewTask}
                   />
                 ))}
               </div>
@@ -1164,20 +1247,41 @@ export default function App() {
         {/* Modal: Edit Task (with column selector) */}
         {modal === "editTask" && editingTask && (
           <div className="modal-backdrop" onClick={() => setModal(null)}>
-            <div className="modal" onClick={(e) => e.stopPropagation()}>
-              <h3>Edit task</h3>
+            <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-head">
+                <h3>Edit task</h3>
+                <button
+                  className="btn-sm"
+                  onClick={() => setEditPreview(!editPreview)}
+                  title="Toggle preview"
+                >
+                  {editPreview ? "Edit" : "Preview"}
+                </button>
+              </div>
               <input
-                autoFocus
                 placeholder="Task title"
                 value={modalValue}
                 onChange={(e) => setModalValue(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && confirmEditTask()}
+                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && confirmEditTask()}
               />
-              <textarea
-                placeholder="Description (optional)"
-                value={modalDesc}
-                onChange={(e) => setModalDesc(e.target.value)}
-              />
+              {editPreview ? (
+                <div className="markdown-preview">
+                  {modalDesc ? (
+                    <div className="markdown">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{modalDesc}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <div className="markdown-empty">No description</div>
+                  )}
+                </div>
+              ) : (
+                <textarea
+                  className="textarea-big"
+                  placeholder="Description (supports markdown, tables, etc.)"
+                  value={modalDesc}
+                  onChange={(e) => setModalDesc(e.target.value)}
+                />
+              )}
               <select
                 value={editingTask.column}
                 onChange={(e) => setEditingTask({ ...editingTask, column: e.target.value })}
@@ -1203,6 +1307,57 @@ export default function App() {
               <div className="modal-actions">
                 <button onClick={() => setModal(null)}>Cancel</button>
                 <button className="btn-primary" onClick={confirmEditTask}>Save</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: View Task (read-only with markdown) */}
+        {viewingTask && (
+          <div className="modal-backdrop" onClick={() => setViewingTask(null)}>
+            <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-head">
+                <h3 className="view-title">{viewingTask.title}</h3>
+                <button
+                  className="btn-sm"
+                  onClick={() => {
+                    const t = viewingTask;
+                    setViewingTask(null);
+                    editTask(t);
+                  }}
+                >
+                  Edit
+                </button>
+              </div>
+              <div className="view-meta">
+                {(() => {
+                  const col = COLUMNS.find((c) => c.id === viewingTask.column);
+                  const prio = PRIORITIES.find((p) => p.id === (viewingTask.priority || "none"));
+                  return (
+                    <>
+                      <span className="view-chip" style={{ color: col?.color, borderColor: col?.color }}>
+                        {col?.label}
+                      </span>
+                      {viewingTask.priority && viewingTask.priority !== "none" && (
+                        <span className="view-chip" style={{ color: prio.color, borderColor: prio.color }}>
+                          {prio.label}
+                        </span>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+              {viewingTask.description ? (
+                <div className="markdown-preview">
+                  <div className="markdown">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewingTask.description}</ReactMarkdown>
+                  </div>
+                </div>
+              ) : (
+                <div className="markdown-empty">No description</div>
+              )}
+              <div className="modal-actions">
+                <button onClick={() => setViewingTask(null)}>Close</button>
               </div>
             </div>
           </div>
