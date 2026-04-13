@@ -681,15 +681,13 @@ export default function App() {
           padding: 4px 10px; font-size: 14px; line-height: 1;
         }
         .priority-feed {
-          display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px;
+          display: flex; gap: 10px; overflow-x: auto; padding: 2px;
           scroll-snap-type: x proximity;
           -webkit-overflow-scrolling: touch;
-          scrollbar-width: thin;
+          scrollbar-width: none;
+          -ms-overflow-style: none;
         }
-        .priority-feed::-webkit-scrollbar { height: 6px; }
-        .priority-feed::-webkit-scrollbar-thumb {
-          background: #2a2d38; border-radius: 3px;
-        }
+        .priority-feed::-webkit-scrollbar { display: none; }
         .feed-card {
           flex: 0 0 220px; background: #161820; border: 1px solid #2a2d38;
           border-left: 3px solid transparent; border-radius: 8px;
