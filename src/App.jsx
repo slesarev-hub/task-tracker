@@ -379,6 +379,7 @@ function TaskCardBody({
   childCount, childDoneCount,
   expanded, onToggleExpand,
   depth = 0,
+  highlighted = false,
   setNodeRef, style, listeners, attributes,
 }) {
   const priority = task.priority || "none";
@@ -395,8 +396,9 @@ function TaskCardBody({
       style={combinedStyle}
       {...(attributes || {})}
       {...(listeners || {})}
-      className={`task-card priority-${priority} col-${task.column}${depth > 0 ? " task-card-child" : ""}`}
+      className={`task-card priority-${priority} col-${task.column}${depth > 0 ? " task-card-child" : ""}${highlighted ? " highlighted" : ""}`}
       data-depth={depth || 0}
+      data-task-id={task.id}
       onClick={() => onView(task)}
     >
       <div className="task-title">{task.title}</div>
@@ -473,7 +475,7 @@ function ColumnDropZone({ columnId, children }) {
 
 function Column({
   col, tasks, onEdit, onDelete, onAdd, onView, childStats,
-  expandedIds, onToggleExpand, getChildren,
+  expandedIds, onToggleExpand, getChildren, highlightedTaskId,
 }) {
   const taskIds = tasks.map((t) => t.id);
 
@@ -493,6 +495,7 @@ function Column({
           expanded={expandedIds.has(c.id)}
           onToggleExpand={onToggleExpand}
           depth={depth}
+          highlighted={highlightedTaskId === c.id}
         />
         {expandedIds.has(c.id) && renderChildrenOf(c.id, depth + 1)}
       </Fragment>
@@ -519,6 +522,7 @@ function Column({
                   childDoneCount={childStats[t.id]?.done || 0}
                   expanded={expandedIds.has(t.id)}
                   onToggleExpand={onToggleExpand}
+                  highlighted={highlightedTaskId === t.id}
                 />
                 {expandedIds.has(t.id) && renderChildrenOf(t.id, 1)}
               </Fragment>
@@ -569,6 +573,8 @@ export default function App() {
   const [editingTask, setEditingTask] = useState(null);
   const [editPreview, setEditPreview] = useState(false);
   const [activeId, setActiveId] = useState(null);
+  const [highlightedTaskId, setHighlightedTaskId] = useState(null);
+  const highlightTimerRef = useRef(null);
   const [expandedIds, setExpandedIds] = useState(() => {
     try {
       const raw = localStorage.getItem(LS_EXPANDED);
@@ -590,6 +596,43 @@ export default function App() {
       return next;
     });
   }, []);
+
+  // Open a task inside its project board and briefly flash it so the user
+  // can find it visually. Expands every ancestor so it's actually visible.
+  const focusTaskInBoard = useCallback((task) => {
+    if (!task) return;
+    // Expand all ancestors
+    const ancestors = [];
+    let cur = task;
+    while (cur && cur.parentId) {
+      ancestors.push(cur.parentId);
+      cur = dataRef.current.tasks.find((t) => t.id === cur.parentId);
+    }
+    if (ancestors.length > 0) {
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of ancestors) next.add(id);
+        return next;
+      });
+    }
+    setActiveProjectId(task.projectId);
+    setView("board");
+    setHighlightedTaskId(task.id);
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => setHighlightedTaskId(null), 2500);
+  }, []);
+
+  // Scroll the highlighted card into view once it's been rendered
+  useEffect(() => {
+    if (!highlightedTaskId) return;
+    const raf = requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-task-id="${highlightedTaskId}"]`);
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [highlightedTaskId]);
 
   // Mobile & online state
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -1422,6 +1465,27 @@ export default function App() {
         }
         .task-card.col-done:hover, .task-card.col-cancelled:hover { opacity: 0.9; }
         .task-card.col-cancelled .task-title { text-decoration: line-through; }
+        @keyframes task-highlight-pulse {
+          0% {
+            box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+            border-color: #2a2d38;
+          }
+          15% {
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.7), 0 0 24px rgba(59, 130, 246, 0.55);
+            border-color: #3b82f6;
+          }
+          80% {
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3), 0 0 18px rgba(59, 130, 246, 0.2);
+            border-color: #3b82f6;
+          }
+          100% {
+            box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+            border-color: #2a2d38;
+          }
+        }
+        .task-card.highlighted {
+          animation: task-highlight-pulse 2.4s ease-out;
+        }
         .task-title { font-size: 14px; font-weight: 400; padding-right: 48px; }
         .task-desc {
           font-size: 12px; color: #6b7280; margin-top: 4px;
@@ -1904,7 +1968,7 @@ export default function App() {
                         key={t.id}
                         className={`feed-card priority-${t.priority || "none"}`}
                         style={{ "--priority-color": priorityDef.color }}
-                        onClick={() => openProject(t.projectId)}
+                        onClick={() => focusTaskInBoard(t)}
                       >
                         <div className="feed-card-project">{projName}</div>
                         <div className="feed-card-title">{t.title}</div>
@@ -2018,6 +2082,7 @@ export default function App() {
                     expandedIds={expandedIds}
                     onToggleExpand={toggleExpand}
                     getChildren={getChildren}
+                    highlightedTaskId={highlightedTaskId}
                   />
                 ))}
               </div>
