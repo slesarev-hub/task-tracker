@@ -552,6 +552,23 @@ export default function App() {
   // Save helper
   const save = useCallback(
     (next) => {
+      // Safety net: refuse to save a state that drops >80% of existing items
+      // without explicit intent. Prevents accidental wipes from stale/empty
+      // memory state clobbering populated localStorage/remote.
+      const curr = dataRef.current || { projects: [], tasks: [] };
+      const currCount = (curr.tasks?.length || 0) + (curr.projects?.length || 0);
+      const nextCount = (next.tasks?.length || 0) + (next.projects?.length || 0);
+      if (currCount >= 5 && nextCount < currCount * 0.2) {
+        console.error(
+          "save() refused: state would shrink from",
+          currCount,
+          "to",
+          nextCount,
+          "items. Likely a bug."
+        );
+        setSyncStatus("error");
+        return;
+      }
       setData(next);
       try { localStorage.setItem(LS_KEY, JSON.stringify(next)); } catch {}
       if (token && sheetId) {
@@ -639,6 +656,42 @@ export default function App() {
   const logout = () => {
     setToken(null);
     try { localStorage.removeItem(LS_TOKEN); } catch {}
+  };
+
+  // Export current data as a downloadable JSON file
+  const exportJson = () => {
+    const payload = JSON.stringify(dataRef.current, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    a.download = `task-tracker-backup-${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // Import data from a JSON file — merges with current state (union)
+  const importJson = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        if (!parsed || !Array.isArray(parsed.projects) || !Array.isArray(parsed.tasks)) {
+          alert("Invalid JSON: expected { projects: [...], tasks: [...] }");
+          return;
+        }
+        const migrated = { projects: parsed.projects, tasks: migrateTasks(parsed.tasks) };
+        const merged = mergeData(dataRef.current, migrated);
+        save(merged);
+      } catch (e) {
+        alert("Failed to parse JSON: " + e.message);
+      }
+    };
+    reader.readAsText(file);
   };
 
   // Overwrite remote with current local state, no merge.
@@ -1608,13 +1661,29 @@ export default function App() {
               <button className="btn-sm btn-primary" onClick={saveSetup}>Save</button>
               <button className="btn-sm" onClick={() => setShowSetup(false)}>Cancel</button>
             </div>
-            {token && sheetId && (
-              <div className="setup-row" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2a2d38" }}>
-                <button className="btn-sm btn-danger" onClick={forcePushToSheets}>
-                  Force push (overwrite remote)
-                </button>
+            <div className="setup-row" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2a2d38", flexDirection: "column", alignItems: "stretch" }}>
+              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Backup</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="btn-sm" onClick={exportJson}>Export JSON</button>
+                <label className="btn-sm" style={{ cursor: "pointer", display: "inline-block" }}>
+                  Import JSON
+                  <input
+                    type="file"
+                    accept="application/json"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      importJson(e.target.files?.[0]);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+                {token && sheetId && (
+                  <button className="btn-sm btn-danger" onClick={forcePushToSheets}>
+                    Force push
+                  </button>
+                )}
               </div>
-            )}
+            </div>
           </div>
         )}
 
