@@ -956,7 +956,7 @@ export default function App() {
     return () => cancelAnimationFrame(raf);
   }, [highlightedTaskId]);
 
-  // Global search — Ctrl/Cmd+K opens modal, Esc closes
+  // Global search — Ctrl/Cmd+K opens popover, Esc closes
   useEffect(() => {
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
@@ -974,6 +974,19 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [globalSearchOpen]);
+  // Click-outside closes the popover (ignore clicks on the trigger itself)
+  useEffect(() => {
+    if (!globalSearchOpen) return;
+    const onDocClick = (e) => {
+      const popover = document.querySelector(".global-search-popover");
+      const trigger = document.querySelector(".global-search-trigger");
+      if (popover && popover.contains(e.target)) return;
+      if (trigger && trigger.contains(e.target)) return;
+      setGlobalSearchOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
   }, [globalSearchOpen]);
 
   // Ranked global search results across tasks + project notes + project names
@@ -1913,19 +1926,23 @@ export default function App() {
         }
         .board-header h2 { font-size: 18px; font-weight: 600; flex: 1; }
 
-        /* Global search */
-        .global-search-backdrop {
-          align-items: flex-start; padding-top: 10vh;
+        /* Global search — floating popover anchored near trigger */
+        .global-search-popover {
+          position: fixed; top: 64px; right: 16px; z-index: 150;
+          width: 480px; max-width: calc(100vw - 32px);
         }
         .global-search-modal {
-          background: #161820; border: 1px solid #2a2d38; border-radius: 12px;
-          width: 100%; max-width: 640px; overflow: hidden;
-          box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
+          background: #161820; border: 1px solid #2a2d38; border-radius: 10px;
+          width: 100%; overflow: hidden;
+          box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
           display: flex; flex-direction: column; max-height: 70vh;
+        }
+        @media (max-width: 640px) {
+          .global-search-popover { top: 56px; right: 10px; left: 10px; width: auto; }
         }
         .global-search-input {
           width: 100%; background: transparent; border: none;
-          color: #e8eaf0; padding: 16px 20px; font-size: 16px;
+          color: #e8eaf0; padding: 12px 16px; font-size: 14px;
           outline: none; border-bottom: 1px solid #2a2d38;
         }
         .global-search-input::placeholder { color: #6b7280; }
@@ -2707,12 +2724,16 @@ export default function App() {
               <button className="btn-sm" onClick={logout}>Logout</button>
             )}
             <button
-              className="btn-sm"
+              className="btn-sm global-search-trigger"
               onClick={() => {
-                setGlobalSearchOpen(true);
-                setGlobalSearchQuery("");
-                setGlobalSearchIdx(0);
-                setTimeout(() => globalSearchInputRef.current?.focus(), 0);
+                if (globalSearchOpen) {
+                  setGlobalSearchOpen(false);
+                } else {
+                  setGlobalSearchOpen(true);
+                  setGlobalSearchQuery("");
+                  setGlobalSearchIdx(0);
+                  setTimeout(() => globalSearchInputRef.current?.focus(), 0);
+                }
               }}
               title="Search everything (Ctrl+K)"
             >
@@ -3251,10 +3272,10 @@ export default function App() {
           </div>
         )}
 
-        {/* Modal: Global Search */}
+        {/* Floating Global Search Popover */}
         {globalSearchOpen && (
-          <div className="modal-backdrop global-search-backdrop" onClick={() => setGlobalSearchOpen(false)}>
-            <div className="global-search-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="global-search-popover" onClick={(e) => e.stopPropagation()}>
+            <div className="global-search-modal">
               <input
                 ref={globalSearchInputRef}
                 className="global-search-input"
