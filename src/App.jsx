@@ -29,6 +29,8 @@ const LS_TOKEN = "task-tracker-token";
 const LS_LAST_SYNC = "task-tracker-last-sync";
 const LS_EXPANDED = "task-tracker-expanded";
 const LS_USER_EMAIL = "task-tracker-user-email";
+const LS_NOTES_LIST_WIDTH = "task-tracker-notes-list-width";
+const LS_NOTES_LIST_COLLAPSED = "task-tracker-notes-list-collapsed";
 
 // A task is considered a child only if parentId is a non-empty string.
 // Empty strings or whitespace must be treated as top-level.
@@ -752,6 +754,46 @@ export default function App() {
   const [projectMode, setProjectMode] = useState("board"); // "board" | "notes"
   const [activeNoteId, setActiveNoteId] = useState(null);
   const [noteEditorPreview, setNoteEditorPreview] = useState(false);
+  const [notesListWidth, setNotesListWidth] = useState(() => {
+    const v = parseInt(localStorage.getItem(LS_NOTES_LIST_WIDTH) || "280", 10);
+    return Number.isFinite(v) && v >= 160 ? v : 280;
+  });
+  const [notesListCollapsed, setNotesListCollapsed] = useState(
+    () => localStorage.getItem(LS_NOTES_LIST_COLLAPSED) === "1"
+  );
+  useEffect(() => {
+    try { localStorage.setItem(LS_NOTES_LIST_WIDTH, String(notesListWidth)); } catch {}
+  }, [notesListWidth]);
+  useEffect(() => {
+    try { localStorage.setItem(LS_NOTES_LIST_COLLAPSED, notesListCollapsed ? "1" : "0"); } catch {}
+  }, [notesListCollapsed]);
+  const notesPanelRef = useRef(null);
+  // Pointer-based resizer for the notes list
+  const onNotesResizeStart = useCallback((e) => {
+    e.preventDefault();
+    const panel = notesPanelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const onMove = (ev) => {
+      const x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left;
+      const clamped = Math.max(160, Math.min(rect.width - 300, x));
+      setNotesListWidth(clamped);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
   const activeNote = activeNoteId
     ? (data.notes || []).find((n) => n.id === activeNoteId)
     : null;
@@ -1927,16 +1969,37 @@ export default function App() {
 
         /* Notes panel (project) */
         .notes-panel {
-          flex: 1; min-height: 0; display: flex; gap: 12px;
+          flex: 1; min-height: 0; display: flex; gap: 0;
           background: #161820; border: 1px solid #1e2028; border-radius: 10px;
-          overflow: hidden;
+          overflow: hidden; position: relative;
         }
         .notes-list {
-          width: 280px; flex-shrink: 0;
+          flex-shrink: 0;
           border-right: 1px solid #1e2028;
           padding: 10px; overflow-y: auto;
           display: flex; flex-direction: column; gap: 6px;
+          transition: width 0.12s ease, padding 0.12s ease;
         }
+        .notes-list-resizer {
+          width: 6px; flex-shrink: 0; cursor: col-resize;
+          background: transparent; transition: background 0.1s;
+          position: relative;
+        }
+        .notes-list-resizer:hover,
+        .notes-list-resizer:active {
+          background: #3b82f6;
+        }
+        .notes-list-resizer::before {
+          content: ""; position: absolute; left: 2px; top: 0; bottom: 0;
+          width: 1px; background: #2a2d38;
+        }
+        .notes-list-show-btn {
+          position: absolute; top: 10px; left: 10px; z-index: 2;
+          background: #1e2028; border: 1px solid #2a2d38;
+          color: #9ca3af; padding: 6px 10px; font-size: 16px; line-height: 1;
+          border-radius: 6px; cursor: pointer;
+        }
+        .notes-list-show-btn:hover { color: #e8eaf0; border-color: #3b82f6; }
         .notes-new-btn {
           border: 1px dashed #2a2d38; background: transparent;
           color: #9ca3af; padding: 8px; text-align: center;
@@ -1969,6 +2032,7 @@ export default function App() {
           flex: 1; min-width: 0; display: flex; flex-direction: column;
           padding: 14px;
         }
+        .notes-panel.collapsed .notes-content { padding-left: 56px; }
         .notes-empty-content {
           flex: 1; display: flex; align-items: center; justify-content: center;
           color: #6b7280; font-size: 13px; text-align: center;
@@ -2836,8 +2900,26 @@ export default function App() {
               )}
             </div>
             {projectMode === "notes" && activeProject && (
-              <div className="notes-panel">
-                <div className="notes-list">
+              <div className={`notes-panel${notesListCollapsed ? " collapsed" : ""}`} ref={notesPanelRef}>
+                {notesListCollapsed && (
+                  <button
+                    className="notes-list-show-btn"
+                    onClick={() => setNotesListCollapsed(false)}
+                    title="Show notes list"
+                  >
+                    &#9776;
+                  </button>
+                )}
+                <div
+                  className="notes-list"
+                  style={{
+                    width: notesListCollapsed ? 0 : notesListWidth,
+                    minWidth: notesListCollapsed ? 0 : 160,
+                    padding: notesListCollapsed ? 0 : undefined,
+                    borderRight: notesListCollapsed ? "none" : undefined,
+                    overflow: notesListCollapsed ? "hidden" : undefined,
+                  }}
+                >
                   <button
                     className="btn-sm notes-new-btn"
                     onClick={() => {
@@ -2873,6 +2955,14 @@ export default function App() {
                     });
                   })()}
                 </div>
+                {!notesListCollapsed && (
+                  <div
+                    className="notes-list-resizer"
+                    onPointerDown={onNotesResizeStart}
+                    onDoubleClick={() => setNotesListCollapsed(true)}
+                    title="Drag to resize, double-click to hide"
+                  />
+                )}
                 <div className="notes-content">
                   {activeNote ? (
                     <>
