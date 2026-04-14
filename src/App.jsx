@@ -223,7 +223,7 @@ const sheetsAppend = async (token, sid, range, values) => {
 };
 
 // Row converters — single source of truth for sheet column layouts
-const projectToRow = (p) => [p.id || "", p.name || "", p.createdAt || "", p.updatedAt || ""];
+const projectToRow = (p) => [p.id || "", p.name || "", p.createdAt || "", p.updatedAt || "", p.notes || ""];
 const taskToRow = (t) => [
   t.id || "",
   t.projectId || "",
@@ -236,7 +236,7 @@ const taskToRow = (t) => [
   t.priority || "none",
   t.parentId || "",
 ];
-const PROJECTS_HEADER = ["id", "name", "createdAt", "updatedAt"];
+const PROJECTS_HEADER = ["id", "name", "createdAt", "updatedAt", "notes"];
 const TASKS_HEADER = ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "parentId"];
 const createSpreadsheet = async (token) => {
   const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
@@ -285,15 +285,15 @@ const migrateTasks = (rawTasks) => {
 // Empty rows (no id) are skipped but their row slot is not reused.
 const readFromSheets = async (token, sid) => {
   const [projRes, taskRes] = await Promise.all([
-    sheetsGet(token, sid, "Projects!A2:D"),
+    sheetsGet(token, sid, "Projects!A2:E"),
     sheetsGet(token, sid, "Tasks!A2:J"),
   ]);
   const projects = [];
   const projRowMap = new Map();
   (projRes.values || []).forEach((row, idx) => {
     if (!row || !row[0]) return;
-    const [id, name, createdAt, updatedAt] = row;
-    projects.push({ id, name, createdAt, updatedAt });
+    const [id, name, createdAt, updatedAt, notes] = row;
+    projects.push({ id, name, createdAt, updatedAt, notes: notes || "" });
     projRowMap.set(id, idx + 2); // row 1 is header, data starts at row 2
   });
   const tasksRaw = [];
@@ -352,7 +352,7 @@ const writeToSheets = async (token, sid, data) => {
 const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
   const batchData = [
     // Always keep the header in sync — cheap and idempotent.
-    { range: "Projects!A1:D1", values: [PROJECTS_HEADER] },
+    { range: "Projects!A1:E1", values: [PROJECTS_HEADER] },
     { range: "Tasks!A1:J1", values: [TASKS_HEADER] },
   ];
   const appendProjects = [];
@@ -392,14 +392,14 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
   };
 
   const projectChanged = (a, b) =>
-    a.updatedAt !== b.updatedAt || a.name !== b.name;
+    a.updatedAt !== b.updatedAt || a.name !== b.name || (a.notes || "") !== (b.notes || "");
   const taskChanged = (a, b) =>
     a.updatedAt !== b.updatedAt ||
     (a.parentId || "") !== (b.parentId || "") ||
     a.column !== b.column ||
     a.order !== b.order;
 
-  diffItems(prev.projects, next.projects, "Projects", 4, projectToRow, projectChanged, rowMap.projects, appendProjects);
+  diffItems(prev.projects, next.projects, "Projects", 5, projectToRow, projectChanged, rowMap.projects, appendProjects);
   diffItems(prev.tasks, next.tasks, "Tasks", 10, taskToRow, taskChanged, rowMap.tasks, appendTasks);
 
   if (batchData.length > 2) {
@@ -411,7 +411,7 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
   }
 
   for (const p of appendProjects) {
-    const res = await sheetsAppend(token, sid, "Projects!A1:D1", [projectToRow(p)]);
+    const res = await sheetsAppend(token, sid, "Projects!A1:E1", [projectToRow(p)]);
     const rng = res?.updates?.updatedRange || "";
     const m = rng.match(/!A(\d+)/);
     if (m) rowMap.projects.set(p.id, parseInt(m[1], 10));
@@ -535,12 +535,16 @@ function ColumnDropZone({ columnId, children }) {
 function Column({
   col, tasks, onEdit, onDelete, onAdd, onView, onCopy, childStats,
   expandedIds, onToggleExpand, getChildren, highlightedTaskId, copiedTarget,
+  visibleTaskIds,
 }) {
   const taskIds = tasks.map((t) => t.id);
 
   // Recursively render children of a given parent
   const renderChildrenOf = (parentId, depth) => {
-    const children = getChildren(parentId);
+    const allChildren = getChildren(parentId);
+    const children = visibleTaskIds
+      ? allChildren.filter((c) => visibleTaskIds.has(c.id))
+      : allChildren;
     if (children.length === 0) return null;
     return children.map((c) => (
       <Fragment key={c.id}>
@@ -563,16 +567,21 @@ function Column({
     ));
   };
 
+  const visibleTopTasks = visibleTaskIds
+    ? tasks.filter((t) => visibleTaskIds.has(t.id))
+    : tasks;
   return (
     <div className="column">
       <div className="column-header" style={{ borderBottomColor: col.color }}>
         <span className="column-title">{col.label}</span>
-        <span className="column-count">{tasks.length}</span>
+        <span className="column-count">
+          {visibleTaskIds ? `${visibleTopTasks.length}/${tasks.length}` : tasks.length}
+        </span>
       </div>
       <div className="column-body">
         <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
           <ColumnDropZone columnId={col.id}>
-            {tasks.map((t) => (
+            {visibleTopTasks.map((t) => (
               <Fragment key={t.id}>
                 <SortableTask
                   task={t}
@@ -638,6 +647,17 @@ export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState(null);
   const highlightTimerRef = useRef(null);
+  const [boardSearch, setBoardSearch] = useState("");
+  const [notesExpanded, setNotesExpanded] = useState(false);
+  const [notesPreview, setNotesPreview] = useState(false);
+  const updateProjectNotes = useCallback((projectId, notes) => {
+    save({
+      ...dataRef.current,
+      projects: dataRef.current.projects.map((p) =>
+        p.id === projectId ? { ...p, notes, updatedAt: now() } : p
+      ),
+    });
+  }, []);
   const [copiedTarget, setCopiedTarget] = useState(null);
   const copyTimerRef = useRef(null);
   const copyText = useCallback(async (text, target) => {
@@ -1322,6 +1342,32 @@ export default function App() {
     }
   });
 
+  // Search inside project: compute set of visible task ids (matches + ancestors).
+  // null = no filter (show everything).
+  const searchTrimmed = boardSearch.trim().toLowerCase();
+  let visibleTaskIds = null;
+  if (searchTrimmed && view === "board") {
+    const matches = (t) =>
+      (t.title || "").toLowerCase().includes(searchTrimmed) ||
+      (t.description || "").toLowerCase().includes(searchTrimmed);
+    visibleTaskIds = new Set();
+    const byId = new Map(projectTasks.map((t) => [t.id, t]));
+    for (const t of projectTasks) {
+      if (matches(t)) {
+        let cur = t;
+        while (cur) {
+          visibleTaskIds.add(cur.id);
+          cur = cur.parentId ? byId.get(cur.parentId) : null;
+        }
+      }
+    }
+  }
+  // Effective expansion: when searching, force-expand every ancestor of a match
+  // so matching descendants are reachable without the user clicking anything.
+  const effectiveExpandedIds = visibleTaskIds
+    ? new Set([...expandedIds, ...visibleTaskIds])
+    : expandedIds;
+
   const draggedTask = activeId ? data.tasks.find((t) => t.id === activeId) : null;
   const deleteProjectName = confirmDeleteId ? data.projects.find((p) => p.id === confirmDeleteId)?.name : "";
 
@@ -1503,6 +1549,53 @@ export default function App() {
           display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
         }
         .board-header h2 { font-size: 18px; font-weight: 600; flex: 1; }
+
+        /* Board search toolbar */
+        .board-toolbar {
+          display: flex; gap: 8px; align-items: center;
+          margin-bottom: 12px; flex-shrink: 0;
+        }
+        .board-search {
+          flex: 1; min-width: 0;
+          background: #0d0f14; border: 1px solid #2a2d38;
+          color: #e8eaf0; padding: 8px 12px; border-radius: 6px;
+          font-size: 13px; outline: none; transition: border-color 0.15s;
+        }
+        .board-search:focus { border-color: #3b82f6; }
+        .board-search::placeholder { color: #6b7280; }
+
+        /* Project notes */
+        .project-notes {
+          flex-shrink: 0; margin-top: 16px; background: #161820;
+          border: 1px solid #2a2d38; border-radius: 10px; overflow: hidden;
+        }
+        .project-notes-head {
+          display: flex; align-items: center; gap: 10px;
+          padding: 10px 14px; cursor: pointer; user-select: none;
+          font-size: 12px; color: #9ca3af; font-weight: 600;
+          text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .project-notes-head:hover { background: #1e2028; }
+        .project-notes-arrow {
+          font-size: 10px; color: #6b7280; width: 10px;
+        }
+        .project-notes-label { flex: 1; }
+        .project-notes-badge {
+          font-size: 10px; color: #6b7280; background: #1e2028;
+          padding: 2px 8px; border-radius: 10px; font-weight: 500;
+          text-transform: none; letter-spacing: 0;
+        }
+        .project-notes-textarea {
+          width: 100%; min-height: 200px; max-height: 60vh;
+          background: #0d0f14; border: none; border-top: 1px solid #2a2d38;
+          color: #e8eaf0; padding: 14px 16px;
+          font-size: 13px; outline: none; resize: vertical;
+          font-family: ui-monospace, Menlo, Consolas, monospace;
+        }
+        .notes-preview {
+          border-radius: 0; border-left: none; border-right: none;
+          border-bottom: none; margin-top: 0;
+        }
 
         /* Mobile column tabs */
         .column-tabs {
@@ -2191,6 +2284,24 @@ export default function App() {
         {/* Board view */}
         {view === "board" && (
           <>
+            <div className="board-toolbar">
+              <input
+                className="board-search"
+                type="text"
+                placeholder="Search tasks in this project…"
+                value={boardSearch}
+                onChange={(e) => setBoardSearch(e.target.value)}
+              />
+              {boardSearch && (
+                <button
+                  className="btn-sm"
+                  onClick={() => setBoardSearch("")}
+                  title="Clear search"
+                >
+                  &times;
+                </button>
+              )}
+            </div>
             {/* Mobile column tabs */}
             <div className="column-tabs">
               {COLUMNS.map((col) => (
@@ -2224,12 +2335,13 @@ export default function App() {
                     onAdd={addTask}
                     onView={viewTask}
                     childStats={childStats}
-                    expandedIds={expandedIds}
+                    expandedIds={effectiveExpandedIds}
                     onToggleExpand={toggleExpand}
                     getChildren={getChildren}
                     highlightedTaskId={highlightedTaskId}
                     onCopy={(t) => copyText(t.title, `card-${t.id}`)}
                     copiedTarget={copiedTarget}
+                    visibleTaskIds={visibleTaskIds}
                   />
                 ))}
               </div>
@@ -2241,6 +2353,54 @@ export default function App() {
                 ) : null}
               </DragOverlay>
             </DndContext>
+            {activeProject && (
+              <div className={`project-notes${notesExpanded ? " expanded" : ""}`}>
+                <div
+                  className="project-notes-head"
+                  onClick={() => setNotesExpanded(!notesExpanded)}
+                >
+                  <span className="project-notes-arrow">{notesExpanded ? "▾" : "▸"}</span>
+                  <span className="project-notes-label">Project notes</span>
+                  {activeProject.notes && (
+                    <span className="project-notes-badge">{activeProject.notes.length} chars</span>
+                  )}
+                  {notesExpanded && (
+                    <button
+                      className="btn-sm"
+                      onClick={(e) => { e.stopPropagation(); setNotesPreview(!notesPreview); }}
+                    >
+                      {notesPreview ? "Edit" : "Preview"}
+                    </button>
+                  )}
+                </div>
+                {notesExpanded && (
+                  notesPreview ? (
+                    <div className="markdown-preview notes-preview">
+                      {activeProject.notes ? (
+                        <div className="markdown">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[rehypeHighlight]}
+                            components={markdownComponents}
+                          >
+                            {activeProject.notes}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <div className="markdown-empty">No notes yet</div>
+                      )}
+                    </div>
+                  ) : (
+                    <textarea
+                      className="project-notes-textarea"
+                      placeholder="Project notes (markdown, tables, code blocks)…"
+                      value={activeProject.notes || ""}
+                      onChange={(e) => updateProjectNotes(activeProject.id, e.target.value)}
+                    />
+                  )
+                )}
+              </div>
+            )}
           </>
         )}
 
