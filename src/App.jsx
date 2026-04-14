@@ -265,11 +265,16 @@ const createSpreadsheet = async (token) => {
   if (!r.ok) throw new Error("Cannot create spreadsheet");
   return (await r.json()).spreadsheetId;
 };
+// Cache of spreadsheet IDs where we've already confirmed the Notes tab exists,
+// so we don't hit the API on every diff push.
+const _ensuredNotesSheets = new Set();
 // Ensure the Notes sheet exists in an existing spreadsheet (idempotent)
 const ensureNotesSheet = async (token, sid) => {
+  if (_ensuredNotesSheets.has(sid)) return true;
   try {
     // Try to read the Notes sheet; if it fails, assume it doesn't exist
     await sheetsGet(token, sid, "Notes!A1:A1");
+    _ensuredNotesSheets.add(sid);
     return true;
   } catch {
     // Create via batchUpdate
@@ -284,7 +289,11 @@ const ensureNotesSheet = async (token, sid) => {
           }),
         }
       );
-      return r.ok;
+      if (r.ok) {
+        _ensuredNotesSheets.add(sid);
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
@@ -420,6 +429,9 @@ const writeToSheets = async (token, sid, data) => {
 // appends return their assigned row. The caller must have already populated
 // rowMap via a successful readFromSheets or force rewrite.
 const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
+  // Make sure the Notes tab exists before we try to write to it — cached so
+  // this is a no-op after the first call per spreadsheet.
+  await ensureNotesSheet(token, sid);
   const batchData = [
     // Always keep the header in sync — cheap and idempotent.
     { range: "Projects!A1:E1", values: [PROJECTS_HEADER] },
@@ -802,11 +814,6 @@ export default function App() {
       ...dataRef.current,
       notes: (dataRef.current.notes || []).filter((n) => n.id !== id),
     });
-  }, []);
-  const getProjectNotes = useCallback((projectId, taskId = undefined) => {
-    const all = (dataRef.current.notes || []).filter((n) => n.projectId === projectId);
-    if (taskId === undefined) return all;
-    return all.filter((n) => (n.taskId || null) === (taskId || null));
   }, []);
   const [copiedTarget, setCopiedTarget] = useState(null);
   const copyTimerRef = useRef(null);
