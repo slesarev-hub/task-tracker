@@ -74,6 +74,7 @@ const mergeData = (local, remote) => {
   return {
     projects: mergeItems(local.projects, remote.projects),
     tasks: mergeItems(local.tasks, remote.tasks),
+    notes: mergeItems(local.notes || [], remote.notes || []),
   };
 };
 
@@ -238,17 +239,56 @@ const taskToRow = (t) => [
 ];
 const PROJECTS_HEADER = ["id", "name", "createdAt", "updatedAt", "notes"];
 const TASKS_HEADER = ["id", "projectId", "title", "column", "order", "createdAt", "updatedAt", "description", "priority", "parentId"];
+const NOTES_HEADER = ["id", "projectId", "taskId", "title", "body", "createdAt", "updatedAt"];
+const noteToRow = (n) => [
+  n.id || "",
+  n.projectId || "",
+  n.taskId || "",
+  n.title || "",
+  n.body || "",
+  n.createdAt || "",
+  n.updatedAt || "",
+];
 const createSpreadsheet = async (token) => {
   const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       properties: { title: "Task Tracker" },
-      sheets: [{ properties: { title: "Projects" } }, { properties: { title: "Tasks" } }],
+      sheets: [
+        { properties: { title: "Projects" } },
+        { properties: { title: "Tasks" } },
+        { properties: { title: "Notes" } },
+      ],
     }),
   });
   if (!r.ok) throw new Error("Cannot create spreadsheet");
   return (await r.json()).spreadsheetId;
+};
+// Ensure the Notes sheet exists in an existing spreadsheet (idempotent)
+const ensureNotesSheet = async (token, sid) => {
+  try {
+    // Try to read the Notes sheet; if it fails, assume it doesn't exist
+    await sheetsGet(token, sid, "Notes!A1:A1");
+    return true;
+  } catch {
+    // Create via batchUpdate
+    try {
+      const r = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requests: [{ addSheet: { properties: { title: "Notes" } } }],
+          }),
+        }
+      );
+      return r.ok;
+    } catch {
+      return false;
+    }
+  }
 };
 // Migrate legacy embedded subtasks into flat tasks with parentId
 const migrateTasks = (rawTasks) => {
@@ -284,9 +324,11 @@ const migrateTasks = (rawTasks) => {
 // Read sheets and return data plus per-id → row-index maps.
 // Empty rows (no id) are skipped but their row slot is not reused.
 const readFromSheets = async (token, sid) => {
-  const [projRes, taskRes] = await Promise.all([
+  const [projRes, taskRes, notesRes] = await Promise.all([
     sheetsGet(token, sid, "Projects!A2:E"),
     sheetsGet(token, sid, "Tasks!A2:J"),
+    // Notes sheet may not exist in older spreadsheets — treat failure as empty
+    sheetsGet(token, sid, "Notes!A2:G").catch(() => ({ values: [] })),
   ]);
   const projects = [];
   const projRowMap = new Map();
@@ -328,13 +370,37 @@ const readFromSheets = async (token, sid) => {
   // migrateTasks may add tasks (legacy subtask children). Those don't yet have
   // sheet rows — they'll be appended on the next diff push.
   const tasks = migrateTasks(tasksRaw);
-  return { projects, tasks, rowMaps: { projects: projRowMap, tasks: taskRowMap } };
+  const notes = [];
+  const notesRowMap = new Map();
+  (notesRes.values || []).forEach((row, idx) => {
+    if (!row || !row[0]) return;
+    const [id, projectId, taskId, title, body, createdAt, updatedAt] = row;
+    notes.push({
+      id,
+      projectId,
+      taskId: taskId || null,
+      title: title || "",
+      body: body || "",
+      createdAt,
+      updatedAt,
+    });
+    notesRowMap.set(id, idx + 2);
+  });
+  return {
+    projects,
+    tasks,
+    notes,
+    rowMaps: { projects: projRowMap, tasks: taskRowMap, notes: notesRowMap },
+  };
 };
 
 // Full rewrite: only used for first-time init and Force push escape hatch.
 const writeToSheets = async (token, sid, data) => {
+  // Make sure Notes tab exists before we try to write to it
+  await ensureNotesSheet(token, sid);
   await sheetsClear(token, sid, "Projects!A1:Z");
   await sheetsClear(token, sid, "Tasks!A1:Z");
+  await sheetsClear(token, sid, "Notes!A1:Z");
   await sheetsUpdate(token, sid, "Projects!A1", [
     PROJECTS_HEADER,
     ...data.projects.map(projectToRow),
@@ -342,6 +408,10 @@ const writeToSheets = async (token, sid, data) => {
   await sheetsUpdate(token, sid, "Tasks!A1", [
     TASKS_HEADER,
     ...data.tasks.map(taskToRow),
+  ]);
+  await sheetsUpdate(token, sid, "Notes!A1", [
+    NOTES_HEADER,
+    ...(data.notes || []).map(noteToRow),
   ]);
 };
 
@@ -354,9 +424,11 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
     // Always keep the header in sync — cheap and idempotent.
     { range: "Projects!A1:E1", values: [PROJECTS_HEADER] },
     { range: "Tasks!A1:J1", values: [TASKS_HEADER] },
+    { range: "Notes!A1:G1", values: [NOTES_HEADER] },
   ];
   const appendProjects = [];
   const appendTasks = [];
+  const appendNotes = [];
 
   const diffItems = (prevItems, nextItems, sheetName, cols, toRow, isChanged, map, appendBucket) => {
     const prevById = new Map((prevItems || []).map((i) => [i.id, i]));
@@ -398,9 +470,15 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
     (a.parentId || "") !== (b.parentId || "") ||
     a.column !== b.column ||
     a.order !== b.order;
+  const noteChanged = (a, b) =>
+    a.updatedAt !== b.updatedAt ||
+    a.title !== b.title ||
+    (a.taskId || "") !== (b.taskId || "") ||
+    (a.body || "") !== (b.body || "");
 
   diffItems(prev.projects, next.projects, "Projects", 5, projectToRow, projectChanged, rowMap.projects, appendProjects);
   diffItems(prev.tasks, next.tasks, "Tasks", 10, taskToRow, taskChanged, rowMap.tasks, appendTasks);
+  diffItems(prev.notes || [], next.notes || [], "Notes", 7, noteToRow, noteChanged, rowMap.notes || new Map(), appendNotes);
 
   if (batchData.length > 2) {
     // More than just headers → actually write
@@ -421,6 +499,13 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
     const rng = res?.updates?.updatedRange || "";
     const m = rng.match(/!A(\d+)/);
     if (m) rowMap.tasks.set(t.id, parseInt(m[1], 10));
+  }
+  if (!rowMap.notes) rowMap.notes = new Map();
+  for (const n of appendNotes) {
+    const res = await sheetsAppend(token, sid, "Notes!A1:G1", [noteToRow(n)]);
+    const rng = res?.updates?.updatedRange || "";
+    const m = rng.match(/!A(\d+)/);
+    if (m) rowMap.notes.set(n.id, parseInt(m[1], 10));
   }
 };
 
@@ -628,11 +713,15 @@ export default function App() {
   const [data, setData] = useState(() => {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return { projects: [], tasks: [] };
+      if (!raw) return { projects: [], tasks: [], notes: [] };
       const parsed = JSON.parse(raw);
-      return { ...parsed, tasks: migrateTasks(parsed.tasks) };
+      return {
+        ...parsed,
+        tasks: migrateTasks(parsed.tasks),
+        notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+      };
     } catch {
-      return { projects: [], tasks: [] };
+      return { projects: [], tasks: [], notes: [] };
     }
   });
   const initialRoute = parseHash();
@@ -648,6 +737,12 @@ export default function App() {
   const [highlightedTaskId, setHighlightedTaskId] = useState(null);
   const highlightTimerRef = useRef(null);
   const [boardSearch, setBoardSearch] = useState("");
+  const [projectMode, setProjectMode] = useState("board"); // "board" | "notes"
+  const [activeNoteId, setActiveNoteId] = useState(null);
+  const [noteEditorPreview, setNoteEditorPreview] = useState(false);
+  const activeNote = activeNoteId
+    ? (data.notes || []).find((n) => n.id === activeNoteId)
+    : null;
   const [notesFullscreen, setNotesFullscreen] = useState(false);
   // Close notes fullscreen on Esc
   useEffect(() => {
@@ -674,6 +769,44 @@ export default function App() {
         p.id === projectId ? { ...p, notes, updatedAt: now() } : p
       ),
     });
+  }, []);
+
+  // ── Notes (linked to project / optionally a task) ──────────────────────
+  const createNote = useCallback((projectId, taskId = null, title = "New note") => {
+    const t = now();
+    const note = {
+      id: uid(),
+      projectId,
+      taskId,
+      title,
+      body: "",
+      createdAt: t,
+      updatedAt: t,
+    };
+    save({
+      ...dataRef.current,
+      notes: [...(dataRef.current.notes || []), note],
+    });
+    return note.id;
+  }, []);
+  const updateNote = useCallback((id, patch) => {
+    save({
+      ...dataRef.current,
+      notes: (dataRef.current.notes || []).map((n) =>
+        n.id === id ? { ...n, ...patch, updatedAt: now() } : n
+      ),
+    });
+  }, []);
+  const deleteNote = useCallback((id) => {
+    save({
+      ...dataRef.current,
+      notes: (dataRef.current.notes || []).filter((n) => n.id !== id),
+    });
+  }, []);
+  const getProjectNotes = useCallback((projectId, taskId = undefined) => {
+    const all = (dataRef.current.notes || []).filter((n) => n.projectId === projectId);
+    if (taskId === undefined) return all;
+    return all.filter((n) => (n.taskId || null) === (taskId || null));
   }, []);
   const [copiedTarget, setCopiedTarget] = useState(null);
   const copyTimerRef = useRef(null);
@@ -799,6 +932,21 @@ export default function App() {
         });
       }
     }
+    for (const n of data.notes || []) {
+      const title = (n.title || "").toLowerCase();
+      const body = (n.body || "").toLowerCase();
+      const titleMatch = title.includes(q);
+      const bodyMatch = body.includes(q);
+      if (titleMatch || bodyMatch) {
+        results.push({
+          kind: "note",
+          note: n,
+          titleMatch,
+          bodyMatch,
+          score: titleMatch ? 3 : 1,
+        });
+      }
+    }
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, 80);
   })();
@@ -834,6 +982,11 @@ export default function App() {
     } else if (r.kind === "project") {
       setActiveProjectId(r.project.id);
       setView("board");
+    } else if (r.kind === "note") {
+      setActiveProjectId(r.note.projectId);
+      setView("board");
+      setProjectMode("notes");
+      setActiveNoteId(r.note.id);
     }
   };
 
@@ -872,8 +1025,8 @@ export default function App() {
   const feedRef = useRef(null);
   const syncFromSheetsRef = useRef(null);
   // Per-row sync bookkeeping
-  const rowMapRef = useRef({ projects: new Map(), tasks: new Map() });
-  const prevSyncedRef = useRef({ projects: [], tasks: [] });
+  const rowMapRef = useRef({ projects: new Map(), tasks: new Map(), notes: new Map() });
+  const prevSyncedRef = useRef({ projects: [], tasks: [], notes: [] });
   const syncedOnceRef = useRef(false);
   const pushTimerRef = useRef(null);
   const pendingSaveRef = useRef(null);
@@ -1156,7 +1309,9 @@ export default function App() {
       (dataRef.current.projects || []).forEach((p, i) => projRows.set(p.id, i + 2));
       const taskRows = new Map();
       (dataRef.current.tasks || []).forEach((t, i) => taskRows.set(t.id, i + 2));
-      rowMapRef.current = { projects: projRows, tasks: taskRows };
+      const noteRows = new Map();
+      (dataRef.current.notes || []).forEach((n, i) => noteRows.set(n.id, i + 2));
+      rowMapRef.current = { projects: projRows, tasks: taskRows, notes: noteRows };
       prevSyncedRef.current = dataRef.current;
       syncedOnceRef.current = true;
       try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
@@ -1173,7 +1328,11 @@ export default function App() {
       const remote = await readFromSheets(token, sheetId);
       // Freshly-pulled rowMaps are the source of truth
       rowMapRef.current = remote.rowMaps;
-      const remoteData = { projects: remote.projects, tasks: remote.tasks };
+      const remoteData = {
+        projects: remote.projects,
+        tasks: remote.tasks,
+        notes: remote.notes || [],
+      };
       const merged = mergeData(dataRef.current, remoteData);
       setData(merged);
       try { localStorage.setItem(LS_KEY, JSON.stringify(merged)); } catch {}
@@ -1737,6 +1896,104 @@ export default function App() {
           background: #1e2028; border: 1px solid #2a2d38; border-radius: 3px;
           padding: 1px 5px; font-family: inherit; font-size: 10px;
           color: #9ca3af;
+        }
+
+        /* Project mode tabs (Board / Notes) */
+        .project-mode-tabs {
+          display: flex; gap: 2px; background: #161820;
+          border: 1px solid #2a2d38; border-radius: 8px; padding: 2px;
+          flex-shrink: 0;
+        }
+        .mode-tab {
+          padding: 6px 14px; font-size: 12px; font-weight: 600;
+          background: transparent; border: none; color: #6b7280;
+          border-radius: 6px; cursor: pointer;
+          text-transform: uppercase; letter-spacing: 0.5px;
+          display: flex; align-items: center; gap: 6px;
+        }
+        .mode-tab:hover { color: #e8eaf0; }
+        .mode-tab.active { background: #1e2028; color: #e8eaf0; }
+        .mode-tab-count {
+          font-size: 10px; background: #2a2d38; color: #9ca3af;
+          padding: 1px 6px; border-radius: 8px; font-weight: 500;
+        }
+
+        /* Notes panel (project) */
+        .notes-panel {
+          flex: 1; min-height: 0; display: flex; gap: 12px;
+          background: #161820; border: 1px solid #1e2028; border-radius: 10px;
+          overflow: hidden;
+        }
+        .notes-list {
+          width: 280px; flex-shrink: 0;
+          border-right: 1px solid #1e2028;
+          padding: 10px; overflow-y: auto;
+          display: flex; flex-direction: column; gap: 6px;
+        }
+        .notes-new-btn {
+          border: 1px dashed #2a2d38; background: transparent;
+          color: #9ca3af; padding: 8px; text-align: center;
+          border-radius: 6px; cursor: pointer; font-size: 12px;
+          font-weight: 500; transition: all 0.15s;
+          flex-shrink: 0;
+        }
+        .notes-new-btn:hover { border-color: #3b82f6; color: #e8eaf0; background: transparent; }
+        .notes-empty { padding: 24px 10px; text-align: center; color: #6b7280; font-size: 12px; }
+        .note-list-item {
+          padding: 10px 12px; border-radius: 6px; cursor: pointer;
+          border: 1px solid transparent; transition: all 0.1s;
+        }
+        .note-list-item:hover { background: #1e2028; border-color: #2a2d38; }
+        .note-list-item.active { background: #1e2028; border-color: #3b82f6; }
+        .note-list-title {
+          font-size: 13px; font-weight: 500; color: #e8eaf0;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .note-list-preview {
+          font-size: 11px; color: #6b7280; margin-top: 3px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .note-list-link {
+          font-size: 10px; color: #3b82f6; margin-top: 4px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600;
+        }
+        .notes-content {
+          flex: 1; min-width: 0; display: flex; flex-direction: column;
+          padding: 14px;
+        }
+        .notes-empty-content {
+          flex: 1; display: flex; align-items: center; justify-content: center;
+          color: #6b7280; font-size: 13px; text-align: center;
+        }
+        .note-editor-head {
+          display: flex; gap: 8px; align-items: center;
+          margin-bottom: 12px; flex-shrink: 0;
+        }
+        .note-title-input {
+          flex: 1; background: transparent; border: none;
+          color: #e8eaf0; font-size: 18px; font-weight: 600;
+          padding: 4px 0; outline: none; min-width: 0;
+        }
+        .note-editor-actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .note-task-select {
+          background: #0d0f14; border: 1px solid #2a2d38;
+          color: #e8eaf0; padding: 4px 10px; font-size: 12px;
+          border-radius: 6px; cursor: pointer; outline: none;
+          max-width: 180px; appearance: none;
+          padding-right: 24px;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M3 4.5L6 8l3-3.5'/%3E%3C/svg%3E");
+          background-repeat: no-repeat; background-position: right 8px center;
+        }
+        .note-body-textarea {
+          flex: 1; min-height: 0;
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          color: #e8eaf0; padding: 12px 14px;
+          font-size: 13px; line-height: 1.6; outline: none; resize: none;
+          font-family: ui-monospace, Menlo, Consolas, monospace;
+        }
+        .note-body-preview {
+          flex: 1; min-height: 0; max-height: none; margin-top: 0;
         }
 
         /* Board search toolbar */
@@ -2532,23 +2789,161 @@ export default function App() {
         {view === "board" && (
           <>
             <div className="board-toolbar">
-              <input
-                className="board-search"
-                type="text"
-                placeholder="Search tasks in this project…"
-                value={boardSearch}
-                onChange={(e) => setBoardSearch(e.target.value)}
-              />
-              {boardSearch && (
+              <div className="project-mode-tabs">
                 <button
-                  className="btn-sm"
-                  onClick={() => setBoardSearch("")}
-                  title="Clear search"
+                  className={`mode-tab${projectMode === "board" ? " active" : ""}`}
+                  onClick={() => setProjectMode("board")}
                 >
-                  &times;
+                  Board
                 </button>
+                <button
+                  className={`mode-tab${projectMode === "notes" ? " active" : ""}`}
+                  onClick={() => { setProjectMode("notes"); setActiveNoteId(null); }}
+                >
+                  Notes
+                  {activeProjectId && (() => {
+                    const n = (data.notes || []).filter((x) => x.projectId === activeProjectId).length;
+                    return n > 0 ? <span className="mode-tab-count">{n}</span> : null;
+                  })()}
+                </button>
+              </div>
+              {projectMode === "board" && (
+                <>
+                  <input
+                    className="board-search"
+                    type="text"
+                    placeholder="Search tasks in this project…"
+                    value={boardSearch}
+                    onChange={(e) => setBoardSearch(e.target.value)}
+                  />
+                  {boardSearch && (
+                    <button
+                      className="btn-sm"
+                      onClick={() => setBoardSearch("")}
+                      title="Clear search"
+                    >
+                      &times;
+                    </button>
+                  )}
+                </>
               )}
             </div>
+            {projectMode === "notes" && activeProject && (
+              <div className="notes-panel">
+                <div className="notes-list">
+                  <button
+                    className="btn-sm notes-new-btn"
+                    onClick={() => {
+                      const id = createNote(activeProject.id, null, "Untitled note");
+                      setActiveNoteId(id);
+                    }}
+                  >
+                    + New note
+                  </button>
+                  {(() => {
+                    const projNotes = (data.notes || [])
+                      .filter((n) => n.projectId === activeProject.id)
+                      .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+                    if (projNotes.length === 0) {
+                      return <div className="notes-empty">No notes yet. Click "+ New note" to create one.</div>;
+                    }
+                    return projNotes.map((n) => {
+                      const linkedTask = n.taskId ? data.tasks.find((t) => t.id === n.taskId) : null;
+                      const firstLine = (n.body || "").split("\n").find((l) => l.trim()) || "";
+                      return (
+                        <div
+                          key={n.id}
+                          className={`note-list-item${activeNoteId === n.id ? " active" : ""}`}
+                          onClick={() => setActiveNoteId(n.id)}
+                        >
+                          <div className="note-list-title">{n.title || "Untitled"}</div>
+                          {firstLine && <div className="note-list-preview">{firstLine}</div>}
+                          {linkedTask && (
+                            <div className="note-list-link">→ {linkedTask.title}</div>
+                          )}
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+                <div className="notes-content">
+                  {activeNote ? (
+                    <>
+                      <div className="note-editor-head">
+                        <input
+                          className="note-title-input"
+                          value={activeNote.title}
+                          onChange={(e) => updateNote(activeNote.id, { title: e.target.value })}
+                          placeholder="Note title"
+                        />
+                        <div className="note-editor-actions">
+                          <select
+                            className="note-task-select"
+                            value={activeNote.taskId || ""}
+                            onChange={(e) => updateNote(activeNote.id, { taskId: e.target.value || null })}
+                          >
+                            <option value="">No linked task</option>
+                            {data.tasks
+                              .filter((t) => t.projectId === activeProject.id)
+                              .sort((a, b) => a.title.localeCompare(b.title))
+                              .map((t) => (
+                                <option key={t.id} value={t.id}>{t.title}</option>
+                              ))}
+                          </select>
+                          <button
+                            className="btn-sm"
+                            onClick={() => setNoteEditorPreview(!noteEditorPreview)}
+                          >
+                            {noteEditorPreview ? "Edit" : "Preview"}
+                          </button>
+                          <button
+                            className="btn-sm btn-danger"
+                            onClick={() => {
+                              if (confirm("Delete this note?")) {
+                                deleteNote(activeNote.id);
+                                setActiveNoteId(null);
+                              }
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                      {noteEditorPreview ? (
+                        <div className="markdown-preview note-body-preview">
+                          {activeNote.body ? (
+                            <div className="markdown">
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                rehypePlugins={[rehypeHighlight]}
+                                components={markdownComponents}
+                              >
+                                {activeNote.body}
+                              </ReactMarkdown>
+                            </div>
+                          ) : (
+                            <div className="markdown-empty">No content</div>
+                          )}
+                        </div>
+                      ) : (
+                        <textarea
+                          className="note-body-textarea"
+                          value={activeNote.body}
+                          onChange={(e) => updateNote(activeNote.id, { body: e.target.value })}
+                          placeholder="Note content (markdown, tables, code blocks)…"
+                        />
+                      )}
+                    </>
+                  ) : (
+                    <div className="notes-empty-content">
+                      Select a note on the left or create a new one.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            {projectMode === "board" && (
+            <>
             {/* Mobile column tabs */}
             <div className="column-tabs">
               {COLUMNS.map((col) => (
@@ -2600,7 +2995,9 @@ export default function App() {
                 ) : null}
               </DragOverlay>
             </DndContext>
-            {activeProject && (
+            </>
+            )}
+            {activeProject && projectMode === "board" && (
               <div className={`project-notes${notesExpanded ? " expanded" : ""}`}>
                 <div
                   className="project-notes-head"
@@ -2767,22 +3164,57 @@ export default function App() {
                           </div>
                         );
                       }
-                      // project kind
-                      const snippet = r.notesMatch
-                        ? extractSnippet(r.project.notes || "", globalSearchQuery.trim())
+                      if (r.kind === "project") {
+                        const snippet = r.notesMatch
+                          ? extractSnippet(r.project.notes || "", globalSearchQuery.trim())
+                          : "";
+                        return (
+                          <div
+                            key={`p-${r.project.id}`}
+                            className={`search-result search-result-project${i === globalSearchIdx ? " active" : ""}`}
+                            onMouseEnter={() => setGlobalSearchIdx(i)}
+                            onClick={() => openSearchResult(r)}
+                          >
+                            <div className="search-result-head">
+                              <span className="search-result-kind">Project</span>
+                            </div>
+                            <div className="search-result-title">
+                              {highlightMatch(r.project.name, globalSearchQuery.trim())}
+                            </div>
+                            {snippet && (
+                              <div className="search-result-snippet">
+                                {highlightMatch(snippet, globalSearchQuery.trim())}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+                      // note kind
+                      const proj = data.projects.find((p) => p.id === r.note.projectId);
+                      const linkedTask = r.note.taskId
+                        ? data.tasks.find((t) => t.id === r.note.taskId)
+                        : null;
+                      const snippet = r.bodyMatch
+                        ? extractSnippet(r.note.body || "", globalSearchQuery.trim())
                         : "";
                       return (
                         <div
-                          key={`p-${r.project.id}`}
-                          className={`search-result search-result-project${i === globalSearchIdx ? " active" : ""}`}
+                          key={`n-${r.note.id}`}
+                          className={`search-result${i === globalSearchIdx ? " active" : ""}`}
                           onMouseEnter={() => setGlobalSearchIdx(i)}
                           onClick={() => openSearchResult(r)}
                         >
                           <div className="search-result-head">
-                            <span className="search-result-kind">Project</span>
+                            <span className="search-result-kind" style={{ color: "#22c55e" }}>Note</span>
+                            <span className="search-result-proj">{proj?.name || "—"}</span>
+                            {linkedTask && (
+                              <span className="search-result-col" style={{ color: "#9ca3af" }}>
+                                → {linkedTask.title}
+                              </span>
+                            )}
                           </div>
                           <div className="search-result-title">
-                            {highlightMatch(r.project.name, globalSearchQuery.trim())}
+                            {highlightMatch(r.note.title || "Untitled", globalSearchQuery.trim())}
                           </div>
                           {snippet && (
                             <div className="search-result-snippet">
@@ -2994,6 +3426,21 @@ export default function App() {
                     <button
                       className="btn-sm"
                       onClick={() => {
+                        const projId = viewingTask.projectId;
+                        const id = createNote(projId, viewingTask.id, "Note: " + viewingTask.title);
+                        setViewingTaskId(null);
+                        setActiveProjectId(projId);
+                        setView("board");
+                        setProjectMode("notes");
+                        setActiveNoteId(id);
+                      }}
+                      title="Create a note linked to this task"
+                    >
+                      + Note
+                    </button>
+                    <button
+                      className="btn-sm"
+                      onClick={() => {
                         const t = viewingTask;
                         setViewingTaskId(null);
                         editTask(t);
@@ -3038,6 +3485,47 @@ export default function App() {
                     </div>
                   </div>
                 )}
+                {(() => {
+                  const linkedNotes = (data.notes || []).filter(
+                    (n) => n.taskId === viewingTask.id
+                  );
+                  if (linkedNotes.length === 0) return null;
+                  return (
+                    <div className="children-section">
+                      <div className="children-header">
+                        <span className="children-label">Linked notes</span>
+                        <span className="subtasks-progress-text">{linkedNotes.length}</span>
+                      </div>
+                      <ul className="children-list">
+                        {linkedNotes.map((n) => {
+                          const firstLine = (n.body || "").split("\n").find((l) => l.trim()) || "";
+                          return (
+                            <li
+                              key={n.id}
+                              className="child-item"
+                              onClick={() => {
+                                const projId = viewingTask.projectId;
+                                setViewingTaskId(null);
+                                setActiveProjectId(projId);
+                                setView("board");
+                                setProjectMode("notes");
+                                setActiveNoteId(n.id);
+                              }}
+                            >
+                              <span className="child-title">{n.title || "Untitled"}</span>
+                              <span className="child-meta">
+                                {firstLine && (
+                                  <span className="child-count" style={{ color: "#9ca3af", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{firstLine}</span>
+                                )}
+                                <span className="child-chevron">›</span>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
                 <div className="children-section">
                   <div className="children-header">
                     <span className="children-label">Subtasks</span>
