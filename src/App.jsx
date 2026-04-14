@@ -426,11 +426,12 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
 
 // ── Task Card body (shared by Sortable and Static wrappers) ──────────────────
 function TaskCardBody({
-  task, onEdit, onDelete, onView,
+  task, onEdit, onDelete, onView, onCopy,
   childCount, childDoneCount,
   expanded, onToggleExpand,
   depth = 0,
   highlighted = false,
+  copiedId = null,
   setNodeRef, style, listeners, attributes,
 }) {
   const priority = task.priority || "none";
@@ -481,6 +482,13 @@ function TaskCardBody({
         )}
       </div>
       <div className="task-actions" onPointerDown={(e) => e.stopPropagation()}>
+        <button
+          className="btn-icon"
+          onClick={(e) => { e.stopPropagation(); onCopy && onCopy(task); }}
+          title="Copy title"
+        >
+          {copiedId === `card-${task.id}` ? "\u2713" : "\u2398"}
+        </button>
         <button className="btn-icon" onClick={(e) => { e.stopPropagation(); onEdit(task); }} title="Edit">&#9998;</button>
         <button className="btn-icon btn-del" onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} title="Delete">&times;</button>
       </div>
@@ -525,8 +533,8 @@ function ColumnDropZone({ columnId, children }) {
 }
 
 function Column({
-  col, tasks, onEdit, onDelete, onAdd, onView, childStats,
-  expandedIds, onToggleExpand, getChildren, highlightedTaskId,
+  col, tasks, onEdit, onDelete, onAdd, onView, onCopy, childStats,
+  expandedIds, onToggleExpand, getChildren, highlightedTaskId, copiedTarget,
 }) {
   const taskIds = tasks.map((t) => t.id);
 
@@ -541,6 +549,8 @@ function Column({
           onEdit={onEdit}
           onDelete={onDelete}
           onView={onView}
+          onCopy={onCopy}
+          copiedId={copiedTarget}
           childCount={childStats[c.id]?.count || 0}
           childDoneCount={childStats[c.id]?.done || 0}
           expanded={expandedIds.has(c.id)}
@@ -569,6 +579,8 @@ function Column({
                   onEdit={onEdit}
                   onDelete={onDelete}
                   onView={onView}
+                  onCopy={onCopy}
+                  copiedId={copiedTarget}
                   childCount={childStats[t.id]?.count || 0}
                   childDoneCount={childStats[t.id]?.done || 0}
                   expanded={expandedIds.has(t.id)}
@@ -626,6 +638,16 @@ export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState(null);
   const highlightTimerRef = useRef(null);
+  const [copiedTarget, setCopiedTarget] = useState(null);
+  const copyTimerRef = useRef(null);
+  const copyText = useCallback(async (text, target) => {
+    try {
+      await navigator.clipboard.writeText(text || "");
+      setCopiedTarget(target);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedTarget(null), 1200);
+    } catch {}
+  }, []);
   const [expandedIds, setExpandedIds] = useState(() => {
     try {
       const raw = localStorage.getItem(LS_EXPANDED);
@@ -1815,7 +1837,17 @@ export default function App() {
           flex: 1; min-height: 220px; max-height: 60vh; overflow: auto;
           background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
           padding: 14px 16px; margin-top: 10px;
+          position: relative;
         }
+        .copy-btn-floating {
+          position: absolute; top: 8px; right: 8px; z-index: 1;
+          padding: 4px 10px; font-size: 11px;
+          background: #14161c; border: 1px solid #2a2d38;
+          color: #9ca3af; cursor: pointer; border-radius: 6px;
+          transition: all 0.15s;
+        }
+        .copy-btn-floating:hover { color: #e8eaf0; border-color: #3b82f6; }
+        .view-title { cursor: pointer; user-select: text; }
 
         /* Muted scrollbars for modal content & table */
         .markdown-preview, .markdown table, .column-body, .board {
@@ -2176,6 +2208,8 @@ export default function App() {
                     onToggleExpand={toggleExpand}
                     getChildren={getChildren}
                     highlightedTaskId={highlightedTaskId}
+                    onCopy={(t) => copyText(t.title, `card-${t.id}`)}
+                    copiedTarget={copiedTarget}
                   />
                 ))}
               </div>
@@ -2362,8 +2396,21 @@ export default function App() {
                       title={`Back to ${parentTask.title}`}
                     >&larr;</button>
                   ) : null}
-                  <h3 className="view-title">{viewingTask.title}</h3>
+                  <h3
+                    className="view-title"
+                    onDoubleClick={() => copyText(viewingTask.title, "view-title")}
+                    title="Double-click to copy title"
+                  >
+                    {viewingTask.title}
+                  </h3>
                   <div className="view-actions-group">
+                    <button
+                      className="btn-sm"
+                      onClick={() => copyText(viewingTask.title, "view-title")}
+                      title="Copy title"
+                    >
+                      {copiedTarget === "view-title" ? "\u2713 Copied" : "Copy title"}
+                    </button>
                     <button
                       className="btn-sm"
                       onClick={() => {
@@ -2399,6 +2446,13 @@ export default function App() {
                 </div>
                 {viewingTask.description && (
                   <div className="markdown-preview">
+                    <button
+                      className="copy-btn-floating"
+                      onClick={() => copyText(viewingTask.description, "view-desc")}
+                      title="Copy description"
+                    >
+                      {copiedTarget === "view-desc" ? "\u2713 Copied" : "Copy"}
+                    </button>
                     <div className="markdown">
                       <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={markdownComponents}>{viewingTask.description}</ReactMarkdown>
                     </div>
