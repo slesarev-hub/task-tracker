@@ -648,6 +648,19 @@ export default function App() {
   const [highlightedTaskId, setHighlightedTaskId] = useState(null);
   const highlightTimerRef = useRef(null);
   const [boardSearch, setBoardSearch] = useState("");
+  const [notesFullscreen, setNotesFullscreen] = useState(false);
+  // Close notes fullscreen on Esc
+  useEffect(() => {
+    if (!notesFullscreen) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setNotesFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [notesFullscreen]);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchIdx, setGlobalSearchIdx] = useState(0);
@@ -1773,6 +1786,52 @@ export default function App() {
           border-bottom: none; margin-top: 0;
         }
 
+        /* Fullscreen notes overlay */
+        .notes-fullscreen {
+          position: fixed; inset: 0; z-index: 200;
+          background: #0d0f14;
+          display: flex; flex-direction: column;
+          padding: 16px;
+          padding-top: max(16px, env(safe-area-inset-top, 16px));
+        }
+        .notes-fullscreen-head {
+          display: flex; align-items: center; justify-content: space-between;
+          gap: 12px; margin-bottom: 12px;
+          padding-bottom: 12px; border-bottom: 1px solid #1e2028;
+          flex-shrink: 0;
+        }
+        .notes-fullscreen-title {
+          display: flex; align-items: center; gap: 12px;
+          font-size: 18px; font-weight: 600;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          flex: 1; min-width: 0;
+        }
+        .notes-fullscreen-kind {
+          font-size: 10px; font-weight: 600; color: #3b82f6;
+          background: #1e2028; padding: 3px 10px; border-radius: 10px;
+          text-transform: uppercase; letter-spacing: 0.5px;
+          flex-shrink: 0;
+        }
+        .notes-fullscreen-actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .notes-fullscreen-body {
+          flex: 1; min-height: 0; overflow: auto;
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 10px;
+          padding: 16px 20px;
+        }
+        .notes-fullscreen-textarea {
+          width: 100%; height: 100%; min-height: 100%;
+          background: transparent; border: none;
+          color: #e8eaf0; padding: 0;
+          font-size: 14px; line-height: 1.6; outline: none; resize: none;
+          font-family: ui-monospace, Menlo, Consolas, monospace;
+        }
+        .notes-fullscreen-body .markdown {
+          font-size: 14px; line-height: 1.6;
+        }
+        .notes-fullscreen-body .markdown h1 { font-size: 22px; }
+        .notes-fullscreen-body .markdown h2 { font-size: 19px; }
+        .notes-fullscreen-body .markdown h3 { font-size: 16px; }
+
         /* Mobile column tabs */
         .column-tabs {
           display: none; gap: 4px; margin-bottom: 12px;
@@ -2553,12 +2612,21 @@ export default function App() {
                     <span className="project-notes-badge">{activeProject.notes.length} chars</span>
                   )}
                   {notesExpanded && (
-                    <button
-                      className="btn-sm"
-                      onClick={(e) => { e.stopPropagation(); setNotesPreview(!notesPreview); }}
-                    >
-                      {notesPreview ? "Edit" : "Preview"}
-                    </button>
+                    <>
+                      <button
+                        className="btn-sm"
+                        onClick={(e) => { e.stopPropagation(); setNotesPreview(!notesPreview); }}
+                      >
+                        {notesPreview ? "Edit" : "Preview"}
+                      </button>
+                      <button
+                        className="btn-sm"
+                        onClick={(e) => { e.stopPropagation(); setNotesFullscreen(true); }}
+                        title="Fullscreen"
+                      >
+                        &#x26F6;
+                      </button>
+                    </>
                   )}
                 </div>
                 {notesExpanded && (
@@ -2590,6 +2658,58 @@ export default function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* Fullscreen Project Notes */}
+        {notesFullscreen && activeProject && (
+          <div className="notes-fullscreen">
+            <div className="notes-fullscreen-head">
+              <h3 className="notes-fullscreen-title">
+                <span className="notes-fullscreen-kind">Notes</span>
+                {activeProject.name}
+              </h3>
+              <div className="notes-fullscreen-actions">
+                <button
+                  className="btn-sm"
+                  onClick={() => setNotesPreview(!notesPreview)}
+                >
+                  {notesPreview ? "Edit" : "Preview"}
+                </button>
+                <button
+                  className="btn-sm"
+                  onClick={() => setNotesFullscreen(false)}
+                  title="Exit fullscreen (Esc)"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="notes-fullscreen-body">
+              {notesPreview ? (
+                activeProject.notes ? (
+                  <div className="markdown">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeHighlight]}
+                      components={markdownComponents}
+                    >
+                      {activeProject.notes}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <div className="markdown-empty">No notes yet</div>
+                )
+              ) : (
+                <textarea
+                  className="notes-fullscreen-textarea"
+                  autoFocus
+                  placeholder="Project notes (markdown, tables, code blocks)…"
+                  value={activeProject.notes || ""}
+                  onChange={(e) => updateProjectNotes(activeProject.id, e.target.value)}
+                />
+              )}
+            </div>
+          </div>
         )}
 
         {/* Modal: Global Search */}
