@@ -28,11 +28,12 @@ const LS_CLIENT = "task-tracker-client-id";
 const LS_TOKEN = "task-tracker-token";
 const LS_LAST_SYNC = "task-tracker-last-sync";
 const LS_EXPANDED = "task-tracker-expanded";
+const LS_USER_EMAIL = "task-tracker-user-email";
 
 // A task is considered a child only if parentId is a non-empty string.
 // Empty strings or whitespace must be treated as top-level.
 const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
-const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+const SCOPES = "https://www.googleapis.com/auth/spreadsheets openid email";
 
 // Merge local and remote using pure UNION semantics: items present on either
 // side are always kept. If the same id appears in both, whichever has a newer
@@ -850,9 +851,12 @@ export default function App() {
   // ── Google Auth ──────────────────────────────────────────────────────────
   const initTokenClient = useCallback(() => {
     if (!window.google || !clientId) return;
+    const storedHint = localStorage.getItem(LS_USER_EMAIL) || undefined;
     tokenClient.current = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: SCOPES,
+      // Pre-fill account hint to skip the "select account" chooser on re-auth
+      ...(storedHint ? { hint: storedHint } : {}),
       callback: (resp) => {
         if (resp.access_token) {
           const expiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
@@ -860,6 +864,19 @@ export default function App() {
           try {
             localStorage.setItem(LS_TOKEN, JSON.stringify({ token: resp.access_token, expiresAt }));
           } catch {}
+          // Fetch user email once so next login can use it as hint
+          if (!localStorage.getItem(LS_USER_EMAIL)) {
+            fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+              headers: { Authorization: `Bearer ${resp.access_token}` },
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((info) => {
+                if (info && info.email) {
+                  try { localStorage.setItem(LS_USER_EMAIL, info.email); } catch {}
+                }
+              })
+              .catch(() => {});
+          }
         }
       },
       error_callback: () => {
@@ -918,7 +935,10 @@ export default function App() {
   const login = () => tokenClient.current?.requestAccessToken();
   const logout = () => {
     setToken(null);
-    try { localStorage.removeItem(LS_TOKEN); } catch {}
+    try {
+      localStorage.removeItem(LS_TOKEN);
+      localStorage.removeItem(LS_USER_EMAIL);
+    } catch {}
   };
 
   // Export current data as a downloadable JSON file
