@@ -648,6 +648,10 @@ export default function App() {
   const [highlightedTaskId, setHighlightedTaskId] = useState(null);
   const highlightTimerRef = useRef(null);
   const [boardSearch, setBoardSearch] = useState("");
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [globalSearchIdx, setGlobalSearchIdx] = useState(0);
+  const globalSearchInputRef = useRef(null);
   const [notesExpanded, setNotesExpanded] = useState(false);
   const [notesPreview, setNotesPreview] = useState(false);
   const updateProjectNotes = useCallback((projectId, notes) => {
@@ -726,6 +730,114 @@ export default function App() {
     });
     return () => cancelAnimationFrame(raf);
   }, [highlightedTaskId]);
+
+  // Global search — Ctrl/Cmd+K opens modal, Esc closes
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setGlobalSearchOpen(true);
+        setGlobalSearchQuery("");
+        setGlobalSearchIdx(0);
+        setTimeout(() => globalSearchInputRef.current?.focus(), 0);
+        return;
+      }
+      if (e.key === "Escape" && globalSearchOpen) {
+        e.preventDefault();
+        setGlobalSearchOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [globalSearchOpen]);
+
+  // Ranked global search results across tasks + project notes + project names
+  const globalSearchResults = (() => {
+    const q = globalSearchQuery.trim().toLowerCase();
+    if (!q || !globalSearchOpen) return [];
+    const results = [];
+    for (const t of data.tasks) {
+      const title = (t.title || "").toLowerCase();
+      const desc = (t.description || "").toLowerCase();
+      const titleMatch = title.includes(q);
+      const descMatch = desc.includes(q);
+      if (titleMatch || descMatch) {
+        results.push({
+          kind: "task",
+          task: t,
+          titleMatch,
+          descMatch,
+          score: titleMatch ? 3 : 1,
+        });
+      }
+    }
+    for (const p of data.projects) {
+      const name = (p.name || "").toLowerCase();
+      const notes = (p.notes || "").toLowerCase();
+      const nameMatch = name.includes(q);
+      const notesMatch = notes.includes(q);
+      if (nameMatch || notesMatch) {
+        results.push({
+          kind: "project",
+          project: p,
+          nameMatch,
+          notesMatch,
+          score: nameMatch ? 4 : 2,
+        });
+      }
+    }
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 80);
+  })();
+
+  // Snippet extractor: show ~90 chars of text around the match
+  const extractSnippet = (text, query, len = 90) => {
+    if (!text) return "";
+    const idx = text.toLowerCase().indexOf(query.toLowerCase());
+    if (idx === -1) return text.slice(0, len);
+    const start = Math.max(0, idx - 30);
+    const end = Math.min(text.length, idx + query.length + 60);
+    return (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+  };
+
+  // Highlight match inside a short text by splitting around query occurrence
+  const highlightMatch = (text, query) => {
+    if (!text || !query) return text;
+    const idx = text.toLowerCase().indexOf(query.toLowerCase());
+    if (idx === -1) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <mark className="search-match">{text.slice(idx, idx + query.length)}</mark>
+        {text.slice(idx + query.length)}
+      </>
+    );
+  };
+
+  const openSearchResult = (r) => {
+    setGlobalSearchOpen(false);
+    if (r.kind === "task") {
+      focusTaskInBoard(r.task);
+    } else if (r.kind === "project") {
+      setActiveProjectId(r.project.id);
+      setView("board");
+    }
+  };
+
+  // Keyboard navigation inside search modal
+  const onGlobalSearchKey = (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setGlobalSearchIdx((i) => Math.min(globalSearchResults.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setGlobalSearchIdx((i) => Math.max(0, i - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const r = globalSearchResults[globalSearchIdx];
+      if (r) openSearchResult(r);
+    }
+  };
 
   // Mobile & online state
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -1550,6 +1662,70 @@ export default function App() {
         }
         .board-header h2 { font-size: 18px; font-weight: 600; flex: 1; }
 
+        /* Global search */
+        .global-search-backdrop {
+          align-items: flex-start; padding-top: 10vh;
+        }
+        .global-search-modal {
+          background: #161820; border: 1px solid #2a2d38; border-radius: 12px;
+          width: 100%; max-width: 640px; overflow: hidden;
+          box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
+          display: flex; flex-direction: column; max-height: 70vh;
+        }
+        .global-search-input {
+          width: 100%; background: transparent; border: none;
+          color: #e8eaf0; padding: 16px 20px; font-size: 16px;
+          outline: none; border-bottom: 1px solid #2a2d38;
+        }
+        .global-search-input::placeholder { color: #6b7280; }
+        .global-search-results {
+          flex: 1; overflow-y: auto; padding: 6px;
+        }
+        .global-search-empty {
+          padding: 24px; text-align: center; color: #6b7280; font-size: 13px;
+        }
+        .search-result {
+          padding: 10px 14px; border-radius: 8px; cursor: pointer;
+          transition: background 0.1s;
+          border: 1px solid transparent;
+        }
+        .search-result.active {
+          background: #1e2028; border-color: #3b82f6;
+        }
+        .search-result-head {
+          display: flex; gap: 8px; align-items: center; margin-bottom: 4px;
+          font-size: 10px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.5px;
+        }
+        .search-result-proj { color: #9ca3af; }
+        .search-result-col, .search-result-prio { }
+        .search-result-kind {
+          color: #3b82f6; padding: 1px 6px; border-radius: 4px;
+          background: #1e2028;
+        }
+        .search-result-title {
+          font-size: 14px; color: #e8eaf0; line-height: 1.3;
+        }
+        .search-result-snippet {
+          font-size: 12px; color: #9ca3af; margin-top: 4px;
+          overflow: hidden; text-overflow: ellipsis;
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+        }
+        .search-match {
+          background: rgba(245, 158, 11, 0.25); color: #fbbf24;
+          border-radius: 2px; padding: 0 2px;
+        }
+        .global-search-hints {
+          display: flex; gap: 16px; padding: 8px 16px;
+          border-top: 1px solid #2a2d38; font-size: 11px; color: #6b7280;
+          flex-shrink: 0;
+        }
+        .global-search-hints kbd {
+          background: #1e2028; border: 1px solid #2a2d38; border-radius: 3px;
+          padding: 1px 5px; font-family: inherit; font-size: 10px;
+          color: #9ca3af;
+        }
+
         /* Board search toolbar */
         .board-toolbar {
           display: flex; gap: 8px; align-items: center;
@@ -2113,6 +2289,18 @@ export default function App() {
             {showSetup && token && (
               <button className="btn-sm" onClick={logout}>Logout</button>
             )}
+            <button
+              className="btn-sm"
+              onClick={() => {
+                setGlobalSearchOpen(true);
+                setGlobalSearchQuery("");
+                setGlobalSearchIdx(0);
+                setTimeout(() => globalSearchInputRef.current?.focus(), 0);
+              }}
+              title="Search everything (Ctrl+K)"
+            >
+              &#128269;
+            </button>
             <button className="btn-sm" onClick={() => setShowSetup(!showSetup)}>&#9881;</button>
           </div>
         </div>
@@ -2402,6 +2590,98 @@ export default function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* Modal: Global Search */}
+        {globalSearchOpen && (
+          <div className="modal-backdrop global-search-backdrop" onClick={() => setGlobalSearchOpen(false)}>
+            <div className="global-search-modal" onClick={(e) => e.stopPropagation()}>
+              <input
+                ref={globalSearchInputRef}
+                className="global-search-input"
+                autoFocus
+                placeholder="Search across all projects, tasks, notes…"
+                value={globalSearchQuery}
+                onChange={(e) => { setGlobalSearchQuery(e.target.value); setGlobalSearchIdx(0); }}
+                onKeyDown={onGlobalSearchKey}
+              />
+              {globalSearchQuery.trim() && (
+                <div className="global-search-results">
+                  {globalSearchResults.length === 0 ? (
+                    <div className="global-search-empty">No matches</div>
+                  ) : (
+                    globalSearchResults.map((r, i) => {
+                      if (r.kind === "task") {
+                        const proj = data.projects.find((p) => p.id === r.task.projectId);
+                        const colDef = COLUMNS.find((c) => c.id === r.task.column);
+                        const prioDef = PRIORITIES.find((p) => p.id === (r.task.priority || "none"));
+                        const snippet = r.descMatch
+                          ? extractSnippet(r.task.description || "", globalSearchQuery.trim())
+                          : "";
+                        return (
+                          <div
+                            key={`t-${r.task.id}`}
+                            className={`search-result${i === globalSearchIdx ? " active" : ""}`}
+                            onMouseEnter={() => setGlobalSearchIdx(i)}
+                            onClick={() => openSearchResult(r)}
+                          >
+                            <div className="search-result-head">
+                              <span className="search-result-proj">{proj?.name || "—"}</span>
+                              <span className="search-result-col" style={{ color: colDef?.color }}>
+                                {colDef?.label}
+                              </span>
+                              {r.task.priority && r.task.priority !== "none" && (
+                                <span className="search-result-prio" style={{ color: prioDef.color }}>
+                                  {prioDef.label}
+                                </span>
+                              )}
+                            </div>
+                            <div className="search-result-title">
+                              {highlightMatch(r.task.title, globalSearchQuery.trim())}
+                            </div>
+                            {snippet && (
+                              <div className="search-result-snippet">
+                                {highlightMatch(snippet, globalSearchQuery.trim())}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+                      // project kind
+                      const snippet = r.notesMatch
+                        ? extractSnippet(r.project.notes || "", globalSearchQuery.trim())
+                        : "";
+                      return (
+                        <div
+                          key={`p-${r.project.id}`}
+                          className={`search-result search-result-project${i === globalSearchIdx ? " active" : ""}`}
+                          onMouseEnter={() => setGlobalSearchIdx(i)}
+                          onClick={() => openSearchResult(r)}
+                        >
+                          <div className="search-result-head">
+                            <span className="search-result-kind">Project</span>
+                          </div>
+                          <div className="search-result-title">
+                            {highlightMatch(r.project.name, globalSearchQuery.trim())}
+                          </div>
+                          {snippet && (
+                            <div className="search-result-snippet">
+                              {highlightMatch(snippet, globalSearchQuery.trim())}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+              <div className="global-search-hints">
+                <span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span>
+                <span><kbd>Enter</kbd> open</span>
+                <span><kbd>Esc</kbd> close</span>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Modal: Add Project */}
