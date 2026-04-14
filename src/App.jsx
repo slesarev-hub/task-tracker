@@ -818,7 +818,7 @@ export default function App() {
     });
     // Try silent refresh if user previously consented but stored token is gone/expired
     if (!loadStoredToken() && localStorage.getItem(LS_TOKEN)) {
-      try { tokenClient.current.requestAccessToken({ prompt: "" }); } catch {}
+      try { tokenClient.current.requestAccessToken({ prompt: "none" }); } catch {}
     }
   }, [clientId]);
 
@@ -859,7 +859,7 @@ export default function App() {
     const msUntilRefresh = Math.max(0, stored.expiresAt - Date.now() - 60000);
     refreshTimer.current = setTimeout(() => {
       if (tokenClient.current) {
-        try { tokenClient.current.requestAccessToken({ prompt: "" }); } catch {}
+        try { tokenClient.current.requestAccessToken({ prompt: "none" }); } catch {}
       }
     }, msUntilRefresh);
     return () => clearTimeout(refreshTimer.current);
