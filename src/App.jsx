@@ -107,6 +107,30 @@ const PRIORITY_RANK = { urgent: 0, soon: 1, none: 2 };
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const now = () => new Date().toISOString();
 
+// Lightweight inline renderer for task card previews: turns `code` spans into
+// styled inline code while leaving everything else as plain text. We don't want
+// the full markdown machinery on each card; this is just enough for the common
+// "command name in backticks" case.
+const renderInlinePreview = (text) => {
+  if (!text) return null;
+  const parts = [];
+  const regex = /`([^`\n]+)`/g;
+  let lastIdx = 0;
+  let match;
+  let key = 0;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIdx) {
+      parts.push(text.slice(lastIdx, match.index));
+    }
+    parts.push(<code key={key++} className="inline-code">{match[1]}</code>);
+    lastIdx = match.index + match[0].length;
+  }
+  if (lastIdx < text.length) {
+    parts.push(text.slice(lastIdx));
+  }
+  return parts;
+};
+
 // Custom renderers for ReactMarkdown: wrap fenced code blocks in a figure with
 // a small language label in the top-right corner.
 const markdownComponents = {
@@ -430,7 +454,7 @@ function TaskCardBody({
       <div className="task-title">{task.title}</div>
       {descPreview && (
         <div className="task-desc">
-          {descPreview}{hasMoreDesc && " …"}
+          {renderInlinePreview(descPreview)}{hasMoreDesc && " …"}
         </div>
       )}
       <div className="task-badges">
@@ -1516,6 +1540,11 @@ export default function App() {
         .task-desc {
           font-size: 12px; color: #6b7280; margin-top: 4px;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .task-desc .inline-code {
+          background: #14161c; padding: 1px 5px; border-radius: 3px;
+          font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
+          color: #e8eaf0; border: 1px solid #2a2d38;
         }
         .task-badges {
           display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px;
