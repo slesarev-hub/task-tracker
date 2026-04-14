@@ -1461,7 +1461,17 @@ export default function App() {
           padding: 10px 12px; cursor: pointer; transition: border-color 0.15s;
           scroll-snap-align: start;
           display: flex; flex-direction: column; gap: 4px;
+          position: relative;
         }
+        .feed-card-copy {
+          position: absolute; top: 6px; right: 6px;
+          background: transparent; border: none; color: #6b7280;
+          padding: 4px 6px; font-size: 13px; line-height: 1;
+          cursor: pointer; border-radius: 4px;
+          opacity: 0; transition: opacity 0.15s, color 0.15s, background 0.15s;
+        }
+        .feed-card:hover .feed-card-copy { opacity: 1; }
+        .feed-card-copy:hover { color: #e8eaf0; background: #2a2d38; }
         .feed-card.priority-urgent { border-left-color: #ef4444; }
         .feed-card.priority-soon { border-left-color: #f59e0b; }
         .feed-card:hover { border-color: #3b82f6; }
@@ -2095,6 +2105,16 @@ export default function App() {
                         style={{ "--priority-color": priorityDef.color }}
                         onClick={() => focusTaskInBoard(t)}
                       >
+                        <button
+                          className="feed-card-copy"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            copyText(t.title, `feed-${t.id}`);
+                          }}
+                          title="Copy title"
+                        >
+                          {copiedTarget === `feed-${t.id}` ? "\u2713" : "\u2398"}
+                        </button>
                         <div className="feed-card-project">{projName}</div>
                         <div className="feed-card-title">{t.title}</div>
                         <div className="feed-card-meta">
