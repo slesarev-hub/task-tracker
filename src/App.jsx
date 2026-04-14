@@ -18,6 +18,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github-dark.css";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const LS_KEY = "task-tracker-v1";
@@ -104,6 +106,30 @@ const PRIORITY_RANK = { urgent: 0, soon: 1, none: 2 };
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const now = () => new Date().toISOString();
+
+// Custom renderers for ReactMarkdown: wrap fenced code blocks in a figure with
+// a small language label in the top-right corner.
+const markdownComponents = {
+  code({ inline, className, children, ...props }) {
+    if (inline) {
+      return <code className={className} {...props}>{children}</code>;
+    }
+    const match = /language-([\w-]+)/.exec(className || "");
+    const lang = match ? match[1] : "";
+    return (
+      <div className="code-block-wrap">
+        {lang && <div className="code-block-lang">{lang}</div>}
+        <pre>
+          <code className={className} {...props}>{children}</code>
+        </pre>
+      </div>
+    );
+  },
+  pre({ children }) {
+    // The custom `code` above already renders its own <pre>, so pass through
+    return <>{children}</>;
+  },
+};
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
 function useMediaQuery(query) {
@@ -1790,9 +1816,27 @@ export default function App() {
         }
         .markdown pre {
           background: #1e2028; padding: 10px 12px; border-radius: 6px;
-          overflow-x: auto; margin: 0 0 10px;
+          overflow-x: auto; margin: 0;
+          font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+          line-height: 1.5;
         }
-        .markdown pre code { background: none; padding: 0; }
+        .markdown pre code {
+          background: none; padding: 0; font-size: inherit;
+          display: block; white-space: pre;
+        }
+        .markdown .code-block-wrap {
+          position: relative; margin: 0 0 10px;
+        }
+        .markdown .code-block-lang {
+          position: absolute; top: 6px; right: 8px;
+          font-size: 10px; text-transform: uppercase;
+          letter-spacing: 0.5px; font-weight: 600; color: #6b7280;
+          background: #14161c; padding: 2px 8px; border-radius: 10px;
+          pointer-events: none; user-select: none;
+          font-family: inherit;
+        }
+        /* highlight.js theme tweaks to match app background */
+        .markdown pre code.hljs { background: transparent; padding: 0; }
         .markdown a { color: #3b82f6; text-decoration: none; }
         .markdown a:hover { text-decoration: underline; }
         .markdown blockquote {
@@ -2180,7 +2224,7 @@ export default function App() {
                 <div className="markdown-preview">
                   {modalDesc ? (
                     <div className="markdown">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{modalDesc}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={markdownComponents}>{modalDesc}</ReactMarkdown>
                     </div>
                   ) : (
                     <div className="markdown-empty">No description</div>
@@ -2307,7 +2351,7 @@ export default function App() {
                 {viewingTask.description && (
                   <div className="markdown-preview">
                     <div className="markdown">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewingTask.description}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={markdownComponents}>{viewingTask.description}</ReactMarkdown>
                     </div>
                   </div>
                 )}
