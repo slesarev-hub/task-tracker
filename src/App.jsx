@@ -111,6 +111,36 @@ const PRIORITY_RANK = { urgent: 0, soon: 1, none: 2 };
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const now = () => new Date().toISOString();
 
+// Tab → 2 spaces in a controlled textarea. Shift+Tab removes up to 2 spaces
+// before the cursor. Keeps cursor position consistent after React re-renders.
+const handleTabIndent = (e, currentValue, setValue) => {
+  if (e.key !== "Tab") return;
+  e.preventDefault();
+  const el = e.target;
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  const TAB = "  ";
+  if (e.shiftKey) {
+    const before = currentValue.slice(0, start);
+    const m = before.match(/ {1,2}$/);
+    if (!m) return;
+    const removeLen = m[0].length;
+    setValue(currentValue.slice(0, start - removeLen) + currentValue.slice(start));
+    requestAnimationFrame(() => {
+      try {
+        el.selectionStart = el.selectionEnd = Math.max(0, start - removeLen);
+      } catch {}
+    });
+    return;
+  }
+  setValue(currentValue.slice(0, start) + TAB + currentValue.slice(end));
+  requestAnimationFrame(() => {
+    try {
+      el.selectionStart = el.selectionEnd = start + TAB.length;
+    } catch {}
+  });
+};
+
 // Lightweight inline renderer for task card previews: turns `code` spans into
 // styled inline code while leaving everything else as plain text. We don't want
 // the full markdown machinery on each card; this is just enough for the common
@@ -3027,6 +3057,11 @@ export default function App() {
                           className="note-body-textarea"
                           value={activeNote.body}
                           onChange={(e) => updateNote(activeNote.id, { body: e.target.value })}
+                          onKeyDown={(e) =>
+                            handleTabIndent(e, activeNote.body, (v) =>
+                              updateNote(activeNote.id, { body: v })
+                            )
+                          }
                           placeholder="Note content (markdown, tables, code blocks)…"
                         />
                       )}
@@ -3146,6 +3181,11 @@ export default function App() {
                       placeholder="Project notes (markdown, tables, code blocks)…"
                       value={activeProject.notes || ""}
                       onChange={(e) => updateProjectNotes(activeProject.id, e.target.value)}
+                      onKeyDown={(e) =>
+                        handleTabIndent(e, activeProject.notes || "", (v) =>
+                          updateProjectNotes(activeProject.id, v)
+                        )
+                      }
                     />
                   )
                 )}
@@ -3200,6 +3240,11 @@ export default function App() {
                   placeholder="Project notes (markdown, tables, code blocks)…"
                   value={activeProject.notes || ""}
                   onChange={(e) => updateProjectNotes(activeProject.id, e.target.value)}
+                  onKeyDown={(e) =>
+                    handleTabIndent(e, activeProject.notes || "", (v) =>
+                      updateProjectNotes(activeProject.id, v)
+                    )
+                  }
                 />
               )}
             </div>
@@ -3428,6 +3473,7 @@ export default function App() {
                   placeholder="Description (supports markdown, tables, etc.)"
                   value={modalDesc}
                   onChange={(e) => setModalDesc(e.target.value)}
+                  onKeyDown={(e) => handleTabIndent(e, modalDesc, setModalDesc)}
                 />
               )}
               <select
