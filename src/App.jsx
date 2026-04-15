@@ -2758,7 +2758,9 @@ export default function App() {
               </>
             ) : clientId ? (
               <button className="btn-sm" onClick={login}>Login</button>
-            ) : null}
+            ) : (
+              <button className="btn-sm" onClick={() => setShowSetup(true)}>Login</button>
+            )}
             {showSetup && token && (
               <button className="btn-sm" onClick={logout}>Logout</button>
             )}
