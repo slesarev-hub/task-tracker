@@ -167,6 +167,8 @@ const renderInlinePreview = (text) => {
 
 // Custom renderers for ReactMarkdown: wrap fenced code blocks in a figure with
 // a small language label in the top-right corner.
+const DIAGRAM_LANGS = new Set(["diagram", "text", "ascii", "txt", "scheme", "box"]);
+
 const markdownComponents = {
   code({ inline, className, children, ...props }) {
     if (inline) {
@@ -174,11 +176,12 @@ const markdownComponents = {
     }
     const match = /language-([\w-]+)/.exec(className || "");
     const lang = match ? match[1] : "";
+    const isDiagram = DIAGRAM_LANGS.has(lang);
     return (
-      <div className="code-block-wrap">
-        {lang && <div className="code-block-lang">{lang}</div>}
+      <div className={`code-block-wrap${isDiagram ? " diagram-block" : ""}`}>
+        {lang && <div className="code-block-lang">{isDiagram ? (lang === "txt" || lang === "text" ? "text" : lang) : lang}</div>}
         <pre>
-          <code className={className} {...props}>{children}</code>
+          <code className={isDiagram ? undefined : className} {...props}>{children}</code>
         </pre>
       </div>
     );
@@ -739,12 +742,21 @@ function Column({
 // ── Hash routing ─────────────────────────────────────────────────────────────
 const parseHash = () => {
   const h = (typeof window !== "undefined" ? window.location.hash.slice(1) : "") || "/";
+  // /p/:id/notes/:noteId
+  const mn = h.match(/^\/p\/([^/?#]+)\/notes(?:\/([^/?#]+))?$/);
+  if (mn) return { view: "board", activeProjectId: mn[1], viewingTaskId: null, projectMode: "notes", activeNoteId: mn[2] || null };
+  // /p/:id/t/:tid
   const m = h.match(/^\/p\/([^/?#]+)(?:\/t\/([^/?#]+))?$/);
-  if (m) return { view: "board", activeProjectId: m[1], viewingTaskId: m[2] || null };
-  return { view: "projects", activeProjectId: null, viewingTaskId: null };
+  if (m) return { view: "board", activeProjectId: m[1], viewingTaskId: m[2] || null, projectMode: "board", activeNoteId: null };
+  return { view: "projects", activeProjectId: null, viewingTaskId: null, projectMode: "board", activeNoteId: null };
 };
-const buildHash = (view, activeProjectId, viewingTaskId) => {
+const buildHash = (view, activeProjectId, viewingTaskId, projectMode, activeNoteId) => {
   if (view === "board" && activeProjectId) {
+    if (projectMode === "notes") {
+      return activeNoteId
+        ? `#/p/${activeProjectId}/notes/${activeNoteId}`
+        : `#/p/${activeProjectId}/notes`;
+    }
     return viewingTaskId
       ? `#/p/${activeProjectId}/t/${viewingTaskId}`
       : `#/p/${activeProjectId}`;
@@ -781,8 +793,8 @@ export default function App() {
   const [highlightedTaskId, setHighlightedTaskId] = useState(null);
   const highlightTimerRef = useRef(null);
   const [boardSearch, setBoardSearch] = useState("");
-  const [projectMode, setProjectMode] = useState("board"); // "board" | "notes"
-  const [activeNoteId, setActiveNoteId] = useState(null);
+  const [projectMode, setProjectMode] = useState(initialRoute.projectMode || "board"); // "board" | "notes"
+  const [activeNoteId, setActiveNoteId] = useState(initialRoute.activeNoteId || null);
   const [noteEditorPreview, setNoteEditorPreview] = useState(false);
   const [notesListWidth, setNotesListWidth] = useState(() => {
     const v = parseInt(localStorage.getItem(LS_NOTES_LIST_WIDTH) || "280", 10);
@@ -1142,12 +1154,12 @@ export default function App() {
   // ── Route persistence: sync state ↔ URL hash ─────────────────────────────
   // state → hash
   useEffect(() => {
-    const desired = buildHash(view, activeProjectId, viewingTaskId);
+    const desired = buildHash(view, activeProjectId, viewingTaskId, projectMode, activeNoteId);
     if (window.location.hash !== desired && !(desired === "#/" && window.location.hash === "")) {
       skipHashSync.current = true;
       window.location.hash = desired;
     }
-  }, [view, activeProjectId, viewingTaskId]);
+  }, [view, activeProjectId, viewingTaskId, projectMode, activeNoteId]);
   // hash → state (browser back/forward)
   useEffect(() => {
     const onHashChange = () => {
@@ -1159,6 +1171,8 @@ export default function App() {
       setView(s.view);
       setActiveProjectId(s.activeProjectId);
       setViewingTaskId(s.viewingTaskId);
+      setProjectMode(s.projectMode || "board");
+      setActiveNoteId(s.activeNoteId || null);
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
@@ -2628,6 +2642,16 @@ export default function App() {
           background: #14161c; padding: 2px 8px; border-radius: 10px;
           pointer-events: none; user-select: none;
           font-family: inherit;
+        }
+        .markdown .diagram-block pre {
+          background: #12141a; border: 1px dashed #2a2d38;
+          padding: 14px 16px; line-height: 1.6;
+        }
+        .markdown .diagram-block pre code {
+          color: #7dd3fc; font-size: 12px;
+        }
+        .markdown .diagram-block .code-block-lang {
+          color: #7dd3fc; background: #12141a; border: 1px dashed #2a2d38;
         }
         /* highlight.js theme tweaks to match app background */
         .markdown pre code.hljs { background: transparent; padding: 0; }
