@@ -35,7 +35,7 @@ const LS_NOTES_LIST_COLLAPSED = "task-tracker-notes-list-collapsed";
 // A task is considered a child only if parentId is a non-empty string.
 // Empty strings or whitespace must be treated as top-level.
 const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
-const SCOPES = "https://www.googleapis.com/auth/spreadsheets openid email";
+const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly openid email";
 
 // Merge local and remote using pure UNION semantics: items present on either
 // side are always kept. If the same id appears in both, whichever has a newer
@@ -284,6 +284,17 @@ const noteToRow = (n) => [
   n.createdAt || "",
   n.updatedAt || "",
 ];
+const findExistingSpreadsheet = async (token) => {
+  const q = encodeURIComponent("name='Task Tracker' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false");
+  const r = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=1`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!r.ok) return null;
+  const data = await r.json();
+  return data.files && data.files.length > 0 ? data.files[0].id : null;
+};
+
 const createSpreadsheet = async (token) => {
   const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
     method: "POST",
@@ -1459,10 +1470,14 @@ export default function App() {
     if (!token) return;
     setSyncStatus("syncing");
     try {
-      const sid = await createSpreadsheet(token);
+      const existed = await findExistingSpreadsheet(token);
+      const sid = existed || await createSpreadsheet(token);
       setSheetId(sid);
       localStorage.setItem(LS_GSHEET, sid);
-      await writeToSheets(token, sid, data);
+      if (!existed) {
+        await writeToSheets(token, sid, data);
+      }
+      // If existed, useEffect [token, sheetId] triggers syncFromSheets
       setSyncStatus("ok");
     } catch {
       setSyncStatus("error");
@@ -2738,7 +2753,7 @@ export default function App() {
             </div>
             {token ? (
               <>
-                {!sheetId && <button className="btn-sm" onClick={createSheet}>Create Sheet</button>}
+                {!sheetId && <button className="btn-sm" onClick={createSheet}>Connect Sheet</button>}
                 {sheetId && <button className="btn-sm" onClick={syncFromSheets}>Sync</button>}
               </>
             ) : clientId ? (
