@@ -18,8 +18,11 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import "highlight.js/styles/github-dark.css";
+import "katex/dist/katex.min.css";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const LS_KEY = "task-tracker-v1";
@@ -3108,8 +3111,8 @@ export default function App() {
                           {activeNote.body ? (
                             <div className="markdown">
                               <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
-                                rehypePlugins={[rehypeHighlight]}
+                                remarkPlugins={[remarkGfm, remarkMath]}
+                                rehypePlugins={[rehypeHighlight, rehypeKatex]}
                                 components={markdownComponents}
                               >
                                 {activeNote.body}
@@ -3231,8 +3234,8 @@ export default function App() {
                       {activeProject.notes ? (
                         <div className="markdown">
                           <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            rehypePlugins={[rehypeHighlight]}
+                            remarkPlugins={[remarkGfm, remarkMath]}
+                            rehypePlugins={[rehypeHighlight, rehypeKatex]}
                             components={markdownComponents}
                           >
                             {activeProject.notes}
@@ -3290,8 +3293,8 @@ export default function App() {
                 activeProject.notes ? (
                   <div className="markdown">
                     <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeHighlight]}
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeHighlight, rehypeKatex]}
                       components={markdownComponents}
                     >
                       {activeProject.notes}
@@ -3528,7 +3531,7 @@ export default function App() {
                 <div className="markdown-preview">
                   {modalDesc ? (
                     <div className="markdown">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={markdownComponents}>{modalDesc}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, rehypeKatex]} components={markdownComponents}>{modalDesc}</ReactMarkdown>
                     </div>
                   ) : (
                     <div className="markdown-empty">No description</div>
@@ -3691,7 +3694,7 @@ export default function App() {
                       {copiedTarget === "view-desc" ? "\u2713 Copied" : "Copy"}
                     </button>
                     <div className="markdown">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={markdownComponents}>{viewingTask.description}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, rehypeKatex]} components={markdownComponents}>{viewingTask.description}</ReactMarkdown>
                     </div>
                   </div>
                 )}
