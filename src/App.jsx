@@ -24,8 +24,8 @@ import "highlight.js/styles/github-dark.css";
 // ── Constants ────────────────────────────────────────────────────────────────
 const LS_KEY = "task-tracker-v1";
 const LS_GSHEET = "task-tracker-gsheet";
-const LS_CLIENT = "task-tracker-client-id";
 const LS_TOKEN = "task-tracker-token";
+const DEFAULT_CLIENT_ID = "1054202800118-4ukmsq00jvu2nab4061b9moit1g1n7o2.apps.googleusercontent.com";
 const LS_LAST_SYNC = "task-tracker-last-sync";
 const LS_EXPANDED = "task-tracker-expanded";
 const LS_USER_EMAIL = "task-tracker-user-email";
@@ -35,7 +35,22 @@ const LS_NOTES_LIST_COLLAPSED = "task-tracker-notes-list-collapsed";
 // A task is considered a child only if parentId is a non-empty string.
 // Empty strings or whitespace must be treated as top-level.
 const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
-const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly openid email";
+const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file openid email";
+
+// Search Google Drive for an existing "Task Tracker" spreadsheet created by this app.
+// drive.file scope gives access only to files created/opened by this app.
+const findSpreadsheetInDrive = async (token) => {
+  const q = encodeURIComponent(
+    "name='Task Tracker' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+  );
+  const r = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=1`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!r.ok) return null;
+  const data = await r.json();
+  return data.files?.[0]?.id || null;
+};
 
 // Merge local and remote using pure UNION semantics: items present on either
 // side are always kept. If the same id appears in both, whichever has a newer
@@ -284,16 +299,6 @@ const noteToRow = (n) => [
   n.createdAt || "",
   n.updatedAt || "",
 ];
-const findExistingSpreadsheet = async (token) => {
-  const q = encodeURIComponent("name='Task Tracker' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false");
-  const r = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=1`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!r.ok) return null;
-  const data = await r.json();
-  return data.files && data.files.length > 0 ? data.files[0].id : null;
-};
 
 const createSpreadsheet = async (token) => {
   const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
@@ -1129,7 +1134,7 @@ export default function App() {
   // Google sync state
   const [syncStatus, setSyncStatus] = useState("idle");
   const [token, setToken] = useState(() => loadStoredToken()?.token || null);
-  const [clientId, setClientId] = useState(() => localStorage.getItem(LS_CLIENT) || "");
+  const clientId = DEFAULT_CLIENT_ID;
   const [sheetId, setSheetId] = useState(() => localStorage.getItem(LS_GSHEET) || "");
   const [showSetup, setShowSetup] = useState(false);
   const gsiLoaded = useRef(false);
@@ -1466,33 +1471,41 @@ export default function App() {
   };
   syncFromSheetsRef.current = syncFromSheets;
 
-  const createSheet = async () => {
-    if (!token) return;
-    setSyncStatus("syncing");
-    try {
-      const existed = await findExistingSpreadsheet(token);
-      const sid = existed || await createSpreadsheet(token);
-      setSheetId(sid);
-      localStorage.setItem(LS_GSHEET, sid);
-      if (!existed) {
-        await writeToSheets(token, sid, data);
-      }
-      // If existed, useEffect [token, sheetId] triggers syncFromSheets
-      setSyncStatus("ok");
-    } catch {
-      setSyncStatus("error");
-    }
-  };
 
+
+  // When we have a token but no sheetId, auto-discover or create the spreadsheet
   useEffect(() => {
-    if (token && sheetId) syncFromSheets();
+    if (!token) return;
+    if (sheetId) {
+      syncFromSheets();
+      return;
+    }
+    // Try to find existing "Task Tracker" spreadsheet via Drive
+    (async () => {
+      setSyncStatus("syncing");
+      try {
+        const existingId = await findSpreadsheetInDrive(token);
+        if (existingId) {
+          setSheetId(existingId);
+          localStorage.setItem(LS_GSHEET, existingId);
+          // syncFromSheets will trigger via the [token, sheetId] dep change
+        } else {
+          // None found — create a new one
+          const newId = await createSpreadsheet(token);
+          setSheetId(newId);
+          localStorage.setItem(LS_GSHEET, newId);
+          await writeToSheets(token, newId, dataRef.current);
+        }
+        setSyncStatus("ok");
+      } catch {
+        setSyncStatus("error");
+      }
+    })();
   }, [token, sheetId]);
 
   const saveSetup = () => {
-    localStorage.setItem(LS_CLIENT, clientId);
     if (sheetId) localStorage.setItem(LS_GSHEET, sheetId);
     setShowSetup(false);
-    if (clientId && !gsiLoaded.current) loadGsi();
   };
 
   // ── DnD sensors ──────────────────────────────────────────────────────────
@@ -2753,13 +2766,10 @@ export default function App() {
             </div>
             {token ? (
               <>
-                {!sheetId && <button className="btn-sm" onClick={createSheet}>Connect Sheet</button>}
                 {sheetId && <button className="btn-sm" onClick={syncFromSheets}>Sync</button>}
               </>
-            ) : clientId ? (
-              <button className="btn-sm" onClick={login}>Login</button>
             ) : (
-              <button className="btn-sm" onClick={() => setShowSetup(true)}>Login</button>
+              <button className="btn-sm" onClick={login}>Login</button>
             )}
             {showSetup && token && (
               <button className="btn-sm" onClick={logout}>Logout</button>
@@ -2789,12 +2799,7 @@ export default function App() {
           <div className="setup-panel">
             <h3>Google Sheets Sync</h3>
             <input
-              placeholder="Google OAuth Client ID"
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-            />
-            <input
-              placeholder="Spreadsheet ID (leave empty to create new)"
+              placeholder="Spreadsheet ID (leave empty for auto-detect)"
               value={sheetId}
               onChange={(e) => setSheetId(e.target.value)}
             />
