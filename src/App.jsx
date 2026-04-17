@@ -2700,15 +2700,15 @@ export default function App() {
           font-size: 12px;
         }
 
-        /* KaTeX sizing: bump inline math slightly and display math noticeably
-           so formulas are legible against the surrounding 13px body text. */
-        .markdown .katex { font-size: 1.1em; }
+        /* KaTeX sizing: bump inline math noticeably and display math much
+           more so subscripts/superscripts stay legible against body text. */
+        .markdown .katex { font-size: 1.3em; }
         .markdown .katex-display { margin: 14px 0; overflow-x: auto; overflow-y: hidden; }
-        .markdown .katex-display > .katex { font-size: 1.35em; }
-        .markdown table .katex { font-size: 1em; }
-        /* Fullscreen notes get bigger body text, scale formulas even more */
-        .notes-fullscreen-body .markdown .katex { font-size: 1.15em; }
-        .notes-fullscreen-body .markdown .katex-display > .katex { font-size: 1.55em; }
+        .markdown .katex-display > .katex { font-size: 1.6em; }
+        .markdown table .katex { font-size: 1.1em; }
+        /* Fullscreen notes scale formulas even more */
+        .notes-fullscreen-body .markdown .katex { font-size: 1.35em; }
+        .notes-fullscreen-body .markdown .katex-display > .katex { font-size: 1.8em; }
         .markdown th, .markdown td {
           border: 1px solid #2a2d38; padding: 5px 10px;
           text-align: left; white-space: nowrap;
