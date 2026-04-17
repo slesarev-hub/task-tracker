@@ -22,6 +22,12 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff,woff2}'],
+        // Activate a new SW the moment it's installed, and take over all
+        // open tabs without waiting for them to close. Otherwise mobile
+        // users keep seeing stale code until every PWA tab is killed.
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
       },
     }),
   ],
