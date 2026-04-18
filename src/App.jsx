@@ -1841,10 +1841,12 @@ export default function App() {
           overscroll-behavior: none;
         }
         .app {
-          max-width: 1200px; margin: 0 auto; padding: 16px;
+          max-width: 1800px; margin: 0 auto; padding: 16px;
           min-height: 100vh; min-height: 100dvh;
           display: flex; flex-direction: column;
         }
+        /* Notes mode gets full viewport width for long-form reading */
+        .app.wide { max-width: none; }
         .header {
           display: flex; align-items: center; justify-content: space-between;
           padding: 12px 0; margin-bottom: 16px; border-bottom: 1px solid #1e2028;
@@ -2791,7 +2793,7 @@ export default function App() {
         }
       `}</style>
 
-      <div className="app">
+      <div className={`app${view === "board" && projectMode === "notes" ? " wide" : ""}`}>
         {/* Header */}
         <div className="header">
           <h1>
