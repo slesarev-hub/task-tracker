@@ -2190,8 +2190,11 @@ export default function App() {
           font-size: 13px; line-height: 1.6; outline: none; resize: none;
           font-family: ui-monospace, Menlo, Consolas, monospace;
         }
-        .note-body-preview {
+        /* Higher specificity than plain .markdown-preview so height limits
+           from the generic preview don't apply inside the notes pane. */
+        .markdown-preview.note-body-preview {
           flex: 1; min-height: 0; max-height: none; margin-top: 0;
+          width: 100%;
         }
 
         /* Board search toolbar */
