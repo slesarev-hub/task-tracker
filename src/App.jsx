@@ -2757,7 +2757,7 @@ export default function App() {
         .markdown table {
           border-collapse: collapse; margin: 0 0 10px;
           display: block; max-width: 100%; overflow-x: auto;
-          font-size: 12px;
+          font-size: 13px;
         }
 
         /* KaTeX sizing: bump inline math noticeably and display math much
@@ -2765,10 +2765,13 @@ export default function App() {
         .markdown .katex { font-size: 1.3em; }
         .markdown .katex-display { margin: 14px 0; overflow-x: auto; overflow-y: hidden; }
         .markdown .katex-display > .katex { font-size: 1.6em; }
-        .markdown table .katex { font-size: 1.1em; }
+        /* Table cells use a slightly smaller body; scale formulas up more so
+           subscripts/superscripts are still legible in cramped cells. */
+        .markdown table .katex { font-size: 1.4em; }
         /* Fullscreen notes scale formulas even more */
         .notes-fullscreen-body .markdown .katex { font-size: 1.35em; }
         .notes-fullscreen-body .markdown .katex-display > .katex { font-size: 1.8em; }
+        .notes-fullscreen-body .markdown table .katex { font-size: 1.45em; }
         .markdown th, .markdown td {
           border: 1px solid #2a2d38; padding: 5px 10px;
           text-align: left; white-space: nowrap;
