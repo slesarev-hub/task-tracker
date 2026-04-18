@@ -1146,6 +1146,7 @@ export default function App() {
   dataRef.current = data;
   const refreshTimer = useRef(null);
   const feedRef = useRef(null);
+  const notesFeedRef = useRef(null);
   const syncFromSheetsRef = useRef(null);
   // Per-row sync bookkeeping
   const rowMapRef = useRef({ projects: new Map(), tasks: new Map(), notes: new Map() });
@@ -1362,6 +1363,19 @@ export default function App() {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, [view, data.tasks.length]);
+  // Same for the recent-notes feed on the home screen
+  useEffect(() => {
+    const el = notesFeedRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      if (e.deltaY === 0) return;
+      if (el.scrollWidth <= el.clientWidth) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [view, (data.notes || []).length]);
 
   // Auto-refresh token ~1 minute before expiry
   useEffect(() => {
@@ -1802,6 +1816,13 @@ export default function App() {
       return (a.updatedAt || "").localeCompare(b.updatedAt || "");
     });
 
+  // Recent notes for the home screen: all notes across projects sorted by
+  // most-recently-updated, capped at 20.
+  const recentNotes = (data.notes || [])
+    .slice()
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
+    .slice(0, 20);
+
   // Columns to render (all on desktop, selected on mobile)
   const visibleColumns = isMobile ? COLUMNS.filter((c) => c.id === mobileCol) : COLUMNS;
 
@@ -1957,6 +1978,18 @@ export default function App() {
         .feed-card-meta {
           display: flex; gap: 8px; margin-top: 2px; font-size: 10px;
           font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .recent-notes-wrap { margin-top: 24px; }
+        .note-feed-card {
+          border-left-color: #22c55e;
+        }
+        .note-feed-card:hover {
+          border-left-color: #22c55e;
+        }
+        .feed-card-desc {
+          font-size: 11px; color: #6b7280; margin-top: 2px; line-height: 1.4;
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+          overflow: hidden;
         }
 
         /* Empty state */
@@ -2963,6 +2996,57 @@ export default function App() {
               })}
               <div className="add-card" onClick={addProject}>+ New project</div>
             </div>
+            {recentNotes.length > 0 && (
+              <div className="priority-feed-wrap recent-notes-wrap">
+                <div className="priority-feed-header">
+                  <span className="priority-feed-title">Recent notes</span>
+                  <div className="priority-feed-nav">
+                    <button
+                      className="feed-arrow"
+                      onClick={() => notesFeedRef.current?.scrollBy({ left: -240, behavior: "smooth" })}
+                      title="Scroll left"
+                    >&larr;</button>
+                    <button
+                      className="feed-arrow"
+                      onClick={() => notesFeedRef.current?.scrollBy({ left: 240, behavior: "smooth" })}
+                      title="Scroll right"
+                    >&rarr;</button>
+                  </div>
+                </div>
+                <div className="priority-feed" ref={notesFeedRef}>
+                  {recentNotes.map((n) => {
+                    const proj = data.projects.find((p) => p.id === n.projectId);
+                    const linkedTask = n.taskId ? data.tasks.find((t) => t.id === n.taskId) : null;
+                    const firstLine = (n.body || "").split("\n").find((l) => l.trim()) || "";
+                    return (
+                      <div
+                        key={n.id}
+                        className="feed-card note-feed-card"
+                        onClick={() => {
+                          setActiveProjectId(n.projectId);
+                          setView("board");
+                          setProjectMode("notes");
+                          setActiveNoteId(n.id);
+                        }}
+                      >
+                        <div className="feed-card-project">{proj?.name || "—"}</div>
+                        <div className="feed-card-title">{n.title || "Untitled"}</div>
+                        {firstLine && (
+                          <div className="feed-card-desc">{firstLine}</div>
+                        )}
+                        {linkedTask && (
+                          <div className="feed-card-meta">
+                            <span className="feed-card-col" style={{ color: "#3b82f6" }}>
+                              &rarr; {linkedTask.title}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
         )}
 
