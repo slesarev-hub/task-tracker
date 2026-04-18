@@ -1846,7 +1846,7 @@ export default function App() {
           display: flex; flex-direction: column;
         }
         /* Notes mode gets full viewport width for long-form reading */
-        .app.wide { max-width: none; }
+        .app.wide { max-width: none; padding: 10px; }
         .header {
           display: flex; align-items: center; justify-content: space-between;
           padding: 12px 0; margin-bottom: 16px; border-bottom: 1px solid #1e2028;
@@ -2096,7 +2096,9 @@ export default function App() {
 
         /* Notes panel (project) */
         .notes-panel {
-          flex: 1; min-height: 0; display: flex; gap: 0;
+          flex: 1; min-height: 0; min-width: 0;
+          width: 100%; align-self: stretch;
+          display: flex; gap: 0;
           background: #161820; border: 1px solid #1e2028; border-radius: 10px;
           overflow: hidden; position: relative;
         }
@@ -2185,6 +2187,8 @@ export default function App() {
         }
         .note-body-textarea {
           flex: 1; min-height: 0;
+          width: 100%; min-width: 0; box-sizing: border-box;
+          display: block;
           background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
           color: #e8eaf0; padding: 12px 14px;
           font-size: 13px; line-height: 1.6; outline: none; resize: none;
