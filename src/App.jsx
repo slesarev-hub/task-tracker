@@ -129,34 +129,25 @@ const PRIORITY_RANK = { urgent: 0, soon: 1, none: 2 };
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const now = () => new Date().toISOString();
 
-// Tab → 2 spaces in a controlled textarea. Shift+Tab removes up to 2 spaces
-// before the cursor. Keeps cursor position consistent after React re-renders.
-const handleTabIndent = (e, currentValue, setValue) => {
+// Tab → 2 spaces, Shift+Tab → outdent. Uses document.execCommand so the change
+// goes through the browser's native input pipeline — preserves the undo stack
+// (Ctrl+Z reverts) and works for both controlled and uncontrolled textareas.
+const handleTabIndent = (e) => {
   if (e.key !== "Tab") return;
   e.preventDefault();
   const el = e.target;
-  const start = el.selectionStart;
-  const end = el.selectionEnd;
-  const TAB = "  ";
   if (e.shiftKey) {
-    const before = currentValue.slice(0, start);
+    const start = el.selectionStart;
+    const value = el.value;
+    const before = value.slice(0, start);
     const m = before.match(/ {1,2}$/);
     if (!m) return;
     const removeLen = m[0].length;
-    setValue(currentValue.slice(0, start - removeLen) + currentValue.slice(start));
-    requestAnimationFrame(() => {
-      try {
-        el.selectionStart = el.selectionEnd = Math.max(0, start - removeLen);
-      } catch {}
-    });
+    el.setSelectionRange(start - removeLen, start);
+    document.execCommand("delete");
     return;
   }
-  setValue(currentValue.slice(0, start) + TAB + currentValue.slice(end));
-  requestAnimationFrame(() => {
-    try {
-      el.selectionStart = el.selectionEnd = start + TAB.length;
-    } catch {}
-  });
+  document.execCommand("insertText", false, "  ");
 };
 
 // Lightweight inline renderer for task card previews: turns `code` spans into
@@ -3192,8 +3183,9 @@ export default function App() {
                     <>
                       <div className="note-editor-head">
                         <input
+                          key={`title-${activeNote.id}`}
                           className="note-title-input"
-                          value={activeNote.title}
+                          defaultValue={activeNote.title}
                           onChange={(e) => updateNote(activeNote.id, { title: e.target.value })}
                           placeholder="Note title"
                         />
@@ -3248,14 +3240,11 @@ export default function App() {
                         </div>
                       ) : (
                         <textarea
+                          key={`body-${activeNote.id}`}
                           className="note-body-textarea"
-                          value={activeNote.body}
+                          defaultValue={activeNote.body}
                           onChange={(e) => updateNote(activeNote.id, { body: e.target.value })}
-                          onKeyDown={(e) =>
-                            handleTabIndent(e, activeNote.body, (v) =>
-                              updateNote(activeNote.id, { body: v })
-                            )
-                          }
+                          onKeyDown={handleTabIndent}
                           placeholder="Note content (markdown, tables, code blocks)…"
                         />
                       )}
@@ -3371,15 +3360,12 @@ export default function App() {
                     </div>
                   ) : (
                     <textarea
+                      key={`projnotes-${activeProject.id}`}
                       className="project-notes-textarea"
                       placeholder="Project notes (markdown, tables, code blocks)…"
-                      value={activeProject.notes || ""}
+                      defaultValue={activeProject.notes || ""}
                       onChange={(e) => updateProjectNotes(activeProject.id, e.target.value)}
-                      onKeyDown={(e) =>
-                        handleTabIndent(e, activeProject.notes || "", (v) =>
-                          updateProjectNotes(activeProject.id, v)
-                        )
-                      }
+                      onKeyDown={handleTabIndent}
                     />
                   )
                 )}
@@ -3429,16 +3415,13 @@ export default function App() {
                 )
               ) : (
                 <textarea
+                  key={`projnotes-fs-${activeProject.id}`}
                   className="notes-fullscreen-textarea"
                   autoFocus
                   placeholder="Project notes (markdown, tables, code blocks)…"
-                  value={activeProject.notes || ""}
+                  defaultValue={activeProject.notes || ""}
                   onChange={(e) => updateProjectNotes(activeProject.id, e.target.value)}
-                  onKeyDown={(e) =>
-                    handleTabIndent(e, activeProject.notes || "", (v) =>
-                      updateProjectNotes(activeProject.id, v)
-                    )
-                  }
+                  onKeyDown={handleTabIndent}
                 />
               )}
             </div>
@@ -3667,7 +3650,7 @@ export default function App() {
                   placeholder="Description (supports markdown, tables, etc.)"
                   value={modalDesc}
                   onChange={(e) => setModalDesc(e.target.value)}
-                  onKeyDown={(e) => handleTabIndent(e, modalDesc, setModalDesc)}
+                  onKeyDown={handleTabIndent}
                 />
               )}
               <select
