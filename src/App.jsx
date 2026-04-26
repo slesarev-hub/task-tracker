@@ -806,6 +806,24 @@ export default function App() {
   const [projectMode, setProjectMode] = useState(initialRoute.projectMode || "board"); // "board" | "notes"
   const [activeNoteId, setActiveNoteId] = useState(initialRoute.activeNoteId || null);
   const [noteEditorPreview, setNoteEditorPreview] = useState(false);
+  // Scroll position (as % of total scroll height) per note, shared between
+  // edit and preview modes. Toggling preview restores roughly the same spot.
+  const noteScrollPctRef = useRef({});
+  const onNoteScroll = useCallback((e) => {
+    if (!activeNoteId) return;
+    const el = e.currentTarget;
+    const total = el.scrollHeight - el.clientHeight;
+    if (total > 0) noteScrollPctRef.current[activeNoteId] = el.scrollTop / total;
+  }, [activeNoteId]);
+  const restoreNoteScroll = useCallback((el) => {
+    if (!el || !activeNoteId) return;
+    const pct = noteScrollPctRef.current[activeNoteId];
+    if (typeof pct !== "number") return;
+    requestAnimationFrame(() => {
+      const total = el.scrollHeight - el.clientHeight;
+      if (total > 0) el.scrollTop = total * pct;
+    });
+  }, [activeNoteId]);
   const [notesListWidth, setNotesListWidth] = useState(() => {
     const v = parseInt(localStorage.getItem(LS_NOTES_LIST_WIDTH) || "280", 10);
     return Number.isFinite(v) && v >= 160 ? v : 280;
@@ -3223,7 +3241,11 @@ export default function App() {
                         </div>
                       </div>
                       {noteEditorPreview ? (
-                        <div className="markdown-preview note-body-preview">
+                        <div
+                          className="markdown-preview note-body-preview"
+                          ref={restoreNoteScroll}
+                          onScroll={onNoteScroll}
+                        >
                           {activeNote.body ? (
                             <div className="markdown">
                               <ReactMarkdown
@@ -3241,6 +3263,8 @@ export default function App() {
                       ) : (
                         <textarea
                           key={`body-${activeNote.id}`}
+                          ref={restoreNoteScroll}
+                          onScroll={onNoteScroll}
                           className="note-body-textarea"
                           defaultValue={activeNote.body}
                           onChange={(e) => updateNote(activeNote.id, { body: e.target.value })}
