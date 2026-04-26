@@ -2169,7 +2169,23 @@ export default function App() {
         .notes-content {
           flex: 1; min-width: 0; display: flex; flex-direction: column;
           padding: 14px;
+          position: relative;
         }
+        /* Floating Edit/Preview toggle that's always reachable while scrolling
+           inside a long note body. */
+        .note-mode-fab {
+          position: absolute; bottom: 20px; right: 24px; z-index: 5;
+          background: #3b82f6; color: #fff;
+          border: 1px solid #3b82f6;
+          padding: 9px 18px; border-radius: 22px;
+          font-size: 12px; font-weight: 600;
+          letter-spacing: 0.5px; text-transform: uppercase;
+          cursor: pointer;
+          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+          transition: background 0.15s, transform 0.1s;
+        }
+        .note-mode-fab:hover { background: #2563eb; border-color: #2563eb; }
+        .note-mode-fab:active { transform: translateY(1px); }
         .notes-panel.collapsed .notes-content { padding-left: 56px; }
         .notes-empty-content {
           flex: 1; display: flex; align-items: center; justify-content: center;
@@ -3199,6 +3215,13 @@ export default function App() {
                 <div className="notes-content">
                   {activeNote ? (
                     <>
+                      <button
+                        className="note-mode-fab"
+                        onClick={() => setNoteEditorPreview(!noteEditorPreview)}
+                        title={noteEditorPreview ? "Switch to edit" : "Switch to preview"}
+                      >
+                        {noteEditorPreview ? "Edit" : "Preview"}
+                      </button>
                       <div className="note-editor-head">
                         <input
                           key={`title-${activeNote.id}`}
