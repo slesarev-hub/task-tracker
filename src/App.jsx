@@ -1153,7 +1153,6 @@ export default function App() {
   const tokenClient = useRef(null);
   const dataRef = useRef(data);
   dataRef.current = data;
-  const refreshTimer = useRef(null);
   const feedRef = useRef(null);
   const notesFeedRef = useRef(null);
   const syncFromSheetsRef = useRef(null);
@@ -1386,19 +1385,11 @@ export default function App() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [view, (data.notes || []).length]);
 
-  // Auto-refresh token ~1 minute before expiry
-  useEffect(() => {
-    if (!token) return;
-    const stored = loadStoredToken();
-    if (!stored) return;
-    const msUntilRefresh = Math.max(0, stored.expiresAt - Date.now() - 60000);
-    refreshTimer.current = setTimeout(() => {
-      if (tokenClient.current) {
-        try { tokenClient.current.requestAccessToken({ prompt: "none" }); } catch {}
-      }
-    }, msUntilRefresh);
-    return () => clearTimeout(refreshTimer.current);
-  }, [token]);
+  // (Periodic auto-refresh removed: it caused a brief Google popup window to
+  // flash every ~hour because Chromium's third-party-cookie restrictions force
+  // GIS to use a popup even with prompt:none. Silent refresh now only runs
+  // once on app load via initTokenClient. If the token expires mid-session,
+  // the user can press Login again — usually that path is also silent.)
 
   const login = () => tokenClient.current?.requestAccessToken();
   const logout = () => {
