@@ -27,8 +27,8 @@ import "katex/dist/katex.min.css";
 // ── Constants ────────────────────────────────────────────────────────────────
 const LS_KEY = "task-tracker-v1";
 const LS_GSHEET = "task-tracker-gsheet";
-const LS_TOKEN = "task-tracker-token";
-const DEFAULT_CLIENT_ID = "1054202800118-4ukmsq00jvu2nab4061b9moit1g1n7o2.apps.googleusercontent.com";
+const LS_SESSION = "task-tracker-session";
+const AUTH_WORKER_URL = "https://task-tracker-auth.alexander-g-slesarev.workers.dev";
 const LS_LAST_SYNC = "task-tracker-last-sync";
 const LS_EXPANDED = "task-tracker-expanded";
 const LS_USER_EMAIL = "task-tracker-user-email";
@@ -41,7 +41,6 @@ const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
 // drive.readonly is needed for cross-device auto-discovery: drive.file only
 // reveals files this app instance created/opened, so a fresh device wouldn't
 // find the existing spreadsheet and would silently create a duplicate.
-const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly openid email";
 
 // Search Google Drive for an existing "Task Tracker" spreadsheet created by this app.
 // drive.file scope gives access only to files created/opened by this app.
@@ -101,18 +100,21 @@ const mergeData = (local, remote) => {
   };
 };
 
-// Load a valid (non-expired) stored token, if any
-const loadStoredToken = () => {
-  try {
-    const raw = localStorage.getItem(LS_TOKEN);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed?.token || !parsed?.expiresAt) return null;
-    if (Date.now() >= parsed.expiresAt - 30000) return null; // 30s buffer
-    return parsed;
-  } catch {
-    return null;
-  }
+// On app load, the Cloudflare Worker may redirect us back with
+//   #session=<id>
+// after a successful Google OAuth flow. If present, persist it and strip the
+// fragment so the app's normal hash routing takes over.
+const consumeSessionFromHash = () => {
+  if (typeof window === "undefined") return null;
+  const hash = window.location.hash;
+  const m = hash.match(/(?:^#|[#&])session=([^&]+)/);
+  if (!m) return null;
+  const sessionId = decodeURIComponent(m[1]);
+  try { localStorage.setItem(LS_SESSION, sessionId); } catch {}
+  // Drop the session fragment, keep any other hash bits (rare).
+  const cleaned = hash.replace(/(^#|&)session=[^&]+/, "").replace(/^#&/, "#");
+  history.replaceState(null, "", window.location.pathname + window.location.search + (cleaned === "#" ? "" : cleaned));
+  return sessionId;
 };
 
 const COLUMNS = [
@@ -1146,14 +1148,22 @@ export default function App() {
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
-  // Google sync state
+  // Google sync state — auth handled by our Cloudflare Worker now
   const [syncStatus, setSyncStatus] = useState("idle");
-  const [token, setToken] = useState(() => loadStoredToken()?.token || null);
-  const clientId = DEFAULT_CLIENT_ID;
+  // Session id returned from the Worker after Google OAuth.
+  // Persisted forever (until logout) so the app stays logged in across reloads.
+  const [sessionId, setSessionId] = useState(() => {
+    const fromHash = consumeSessionFromHash();
+    if (fromHash) return fromHash;
+    try { return localStorage.getItem(LS_SESSION) || null; } catch { return null; }
+  });
+  // Short-lived access token, kept only in memory. Refreshed via Worker /token.
+  const [token, setToken] = useState(null);
+  const tokenExpiresAtRef = useRef(0);
+  const refreshingRef = useRef(null); // de-dupes concurrent refresh calls
   const [sheetId, setSheetId] = useState(() => localStorage.getItem(LS_GSHEET) || "");
+  const [userEmail, setUserEmail] = useState(() => localStorage.getItem(LS_USER_EMAIL) || "");
   const [showSetup, setShowSetup] = useState(false);
-  const gsiLoaded = useRef(false);
-  const tokenClient = useRef(null);
   const dataRef = useRef(data);
   dataRef.current = data;
   const feedRef = useRef(null);
@@ -1257,8 +1267,25 @@ export default function App() {
     pendingSaveRef.current = null;
     pushInFlightRef.current = true;
     setSyncStatus("syncing");
+    let activeToken = token;
     try {
-      await diffPushToSheets(token, sheetId, prevSyncedRef.current, toSave, rowMapRef.current);
+      try {
+        await diffPushToSheets(activeToken, sheetId, prevSyncedRef.current, toSave, rowMapRef.current);
+      } catch (e) {
+        // Access token might have expired mid-session — try once to refresh
+        // via the Worker and retry the push silently.
+        if (String(e?.message || "").includes("401") && sessionId) {
+          const fresh = await refreshAccessToken();
+          if (fresh) {
+            activeToken = fresh;
+            await diffPushToSheets(activeToken, sheetId, prevSyncedRef.current, toSave, rowMapRef.current);
+          } else {
+            throw e;
+          }
+        } else {
+          throw e;
+        }
+      }
       prevSyncedRef.current = toSave;
       try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
       setSyncStatus("ok");
@@ -1272,7 +1299,7 @@ export default function App() {
         pushTimerRef.current = setTimeout(flushPush, 500);
       }
     }
-  }, [token, sheetId]);
+  }, [token, sheetId, sessionId, refreshAccessToken]);
 
   // Save helper
   const save = useCallback(
@@ -1305,56 +1332,50 @@ export default function App() {
     [token, sheetId, flushPush]
   );
 
-  // ── Google Auth ──────────────────────────────────────────────────────────
-  const initTokenClient = useCallback(() => {
-    if (!window.google || !clientId) return;
-    const storedHint = localStorage.getItem(LS_USER_EMAIL) || undefined;
-    tokenClient.current = window.google.accounts.oauth2.initTokenClient({
-      client_id: clientId,
-      scope: SCOPES,
-      // Pre-fill account hint to skip the "select account" chooser on re-auth
-      ...(storedHint ? { hint: storedHint } : {}),
-      callback: (resp) => {
-        if (resp.access_token) {
-          const expiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
-          setToken(resp.access_token);
-          try {
-            localStorage.setItem(LS_TOKEN, JSON.stringify({ token: resp.access_token, expiresAt }));
-          } catch {}
-          // Fetch user email once so next login can use it as hint
-          if (!localStorage.getItem(LS_USER_EMAIL)) {
-            fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-              headers: { Authorization: `Bearer ${resp.access_token}` },
-            })
-              .then((r) => (r.ok ? r.json() : null))
-              .then((info) => {
-                if (info && info.email) {
-                  try { localStorage.setItem(LS_USER_EMAIL, info.email); } catch {}
-                }
-              })
-              .catch(() => {});
+  // ── Auth via the Cloudflare Worker ──────────────────────────────────────
+  // Calls /token on the Worker with the stored session id and updates the
+  // in-memory access_token. Concurrent calls share one in-flight request.
+  const refreshAccessToken = useCallback(async () => {
+    if (!sessionId) return null;
+    if (refreshingRef.current) return refreshingRef.current;
+    const p = (async () => {
+      try {
+        const res = await fetch(`${AUTH_WORKER_URL}/token`, {
+          headers: { Authorization: `Bearer ${sessionId}` },
+        });
+        if (!res.ok) {
+          if (res.status === 401) {
+            // Session got rejected — clear it so the UI shows Login again
+            try { localStorage.removeItem(LS_SESSION); } catch {}
+            setSessionId(null);
+            setToken(null);
           }
+          return null;
         }
-      },
-      error_callback: () => {
-        // Silent refresh failed or user dismissed — leave token null
-      },
-    });
-  }, [clientId]);
+        const data = await res.json();
+        const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+        setToken(data.access_token);
+        tokenExpiresAtRef.current = expiresAt;
+        if (data.email && data.email !== userEmail) {
+          setUserEmail(data.email);
+          try { localStorage.setItem(LS_USER_EMAIL, data.email); } catch {}
+        }
+        return data.access_token;
+      } catch {
+        return null;
+      } finally {
+        refreshingRef.current = null;
+      }
+    })();
+    refreshingRef.current = p;
+    return p;
+  }, [sessionId, userEmail]);
 
-  const loadGsi = useCallback(() => {
-    if (!clientId) return;
-    if (gsiLoaded.current) { initTokenClient(); return; }
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.onload = () => {
-      gsiLoaded.current = true;
-      initTokenClient();
-    };
-    document.head.appendChild(s);
-  }, [clientId, initTokenClient]);
-
-  useEffect(() => { loadGsi(); }, [loadGsi]);
+  // First load (and any time sessionId changes) → fetch a fresh access token.
+  useEffect(() => {
+    if (sessionId) refreshAccessToken();
+    else setToken(null);
+  }, [sessionId, refreshAccessToken]);
 
   // Mouse wheel → horizontal scroll on priority feed
   useEffect(() => {
@@ -1384,17 +1405,26 @@ export default function App() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [view, (data.notes || []).length]);
 
-  // (Periodic auto-refresh removed: it caused a brief Google popup window to
-  // flash every ~hour because Chromium's third-party-cookie restrictions force
-  // GIS to use a popup even with prompt:none. Silent refresh now only runs
-  // once on app load via initTokenClient. If the token expires mid-session,
-  // the user can press Login again — usually that path is also silent.)
-
-  const login = () => tokenClient.current?.requestAccessToken();
+  // Login: full-page redirect to the Worker, which redirects to Google OAuth
+  // and back. After the user grants access we land back here with the session
+  // id in the URL hash, where consumeSessionFromHash() picks it up.
+  const login = () => {
+    const back = encodeURIComponent(window.location.href);
+    window.location.href = `${AUTH_WORKER_URL}/login?redirect=${back}`;
+  };
+  // Logout: invalidate the session on the Worker, drop local state.
   const logout = () => {
+    if (sessionId) {
+      fetch(`${AUTH_WORKER_URL}/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionId}` },
+      }).catch(() => {});
+    }
     setToken(null);
+    setSessionId(null);
+    setUserEmail("");
     try {
-      localStorage.removeItem(LS_TOKEN);
+      localStorage.removeItem(LS_SESSION);
       localStorage.removeItem(LS_USER_EMAIL);
     } catch {}
   };
@@ -2855,14 +2885,14 @@ export default function App() {
                 title={`Sync: ${syncStatus}`}
               />
             </div>
-            {token ? (
+            {sessionId ? (
               <>
                 {sheetId && <button className="btn-sm" onClick={syncFromSheets}>Sync</button>}
               </>
             ) : (
               <button className="btn-sm" onClick={login}>Login</button>
             )}
-            {showSetup && token && (
+            {showSetup && sessionId && (
               <button className="btn-sm" onClick={logout}>Logout</button>
             )}
             <button
