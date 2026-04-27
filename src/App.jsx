@@ -38,7 +38,10 @@ const LS_NOTES_LIST_COLLAPSED = "task-tracker-notes-list-collapsed";
 // A task is considered a child only if parentId is a non-empty string.
 // Empty strings or whitespace must be treated as top-level.
 const hasParent = (t) => Boolean(t && t.parentId && String(t.parentId).trim());
-const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file openid email";
+// drive.readonly is needed for cross-device auto-discovery: drive.file only
+// reveals files this app instance created/opened, so a fresh device wouldn't
+// find the existing spreadsheet and would silently create a duplicate.
+const SCOPES = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly openid email";
 
 // Search Google Drive for an existing "Task Tracker" spreadsheet created by this app.
 // drive.file scope gives access only to files created/opened by this app.
