@@ -1836,8 +1836,23 @@ export default function App() {
   const deleteProjectName = confirmDeleteId ? data.projects.find((p) => p.id === confirmDeleteId)?.name : "";
 
   // Priority feed: all active tasks from all projects, sorted by priority
+  // A task is "active" only if neither it nor any of its ancestors is in the
+  // done or cancelled column. Closing a parent should hide its open subtasks
+  // from the priority feed too.
+  const taskById = new Map(data.tasks.map((t) => [t.id, t]));
+  const isClosedBranch = (task) => {
+    let cur = task;
+    const guard = new Set();
+    while (cur) {
+      if (cur.column === "done" || cur.column === "cancelled") return true;
+      if (!cur.parentId || guard.has(cur.parentId)) break;
+      guard.add(cur.parentId);
+      cur = taskById.get(cur.parentId);
+    }
+    return false;
+  };
   const priorityFeed = data.tasks
-    .filter((t) => t.column !== "done" && t.column !== "cancelled")
+    .filter((t) => !isClosedBranch(t))
     .sort((a, b) => {
       const pa = PRIORITY_RANK[a.priority || "none"] ?? 2;
       const pb = PRIORITY_RANK[b.priority || "none"] ?? 2;
