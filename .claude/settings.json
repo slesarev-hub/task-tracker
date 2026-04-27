@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:5179/)",
+      "Bash(grep -n \"const flushPush\\\\|const refreshAccessToken\\\\|refreshAccessToken,$\\\\|refreshAccessToken]\" /home/slesarev/task-tracker/src/App.jsx)"
+    ]
+  }
+}

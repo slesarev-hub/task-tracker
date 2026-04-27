@@ -1250,6 +1250,51 @@ export default function App() {
     };
   }, [token, sheetId]);
 
+  // ── Auth via the Cloudflare Worker ──────────────────────────────────────
+  // Calls /token on the Worker with the stored session id and updates the
+  // in-memory access_token. Concurrent calls share one in-flight request.
+  // Defined BEFORE flushPush because flushPush captures it via deps.
+  const refreshAccessToken = useCallback(async () => {
+    if (!sessionId) return null;
+    if (refreshingRef.current) return refreshingRef.current;
+    const p = (async () => {
+      try {
+        const res = await fetch(`${AUTH_WORKER_URL}/token`, {
+          headers: { Authorization: `Bearer ${sessionId}` },
+        });
+        if (!res.ok) {
+          if (res.status === 401) {
+            try { localStorage.removeItem(LS_SESSION); } catch {}
+            setSessionId(null);
+            setToken(null);
+          }
+          return null;
+        }
+        const data = await res.json();
+        const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+        setToken(data.access_token);
+        tokenExpiresAtRef.current = expiresAt;
+        if (data.email && data.email !== userEmail) {
+          setUserEmail(data.email);
+          try { localStorage.setItem(LS_USER_EMAIL, data.email); } catch {}
+        }
+        return data.access_token;
+      } catch {
+        return null;
+      } finally {
+        refreshingRef.current = null;
+      }
+    })();
+    refreshingRef.current = p;
+    return p;
+  }, [sessionId, userEmail]);
+
+  // First load (and any time sessionId changes) → fetch a fresh access token.
+  useEffect(() => {
+    if (sessionId) refreshAccessToken();
+    else setToken(null);
+  }, [sessionId, refreshAccessToken]);
+
   // Debounced, serialized diff-push flush.
   // Multiple rapid save() calls coalesce into a single push of the latest state.
   // Only one push runs at a time; if a new save arrives mid-flight, it reruns
@@ -1331,51 +1376,6 @@ export default function App() {
     },
     [token, sheetId, flushPush]
   );
-
-  // ── Auth via the Cloudflare Worker ──────────────────────────────────────
-  // Calls /token on the Worker with the stored session id and updates the
-  // in-memory access_token. Concurrent calls share one in-flight request.
-  const refreshAccessToken = useCallback(async () => {
-    if (!sessionId) return null;
-    if (refreshingRef.current) return refreshingRef.current;
-    const p = (async () => {
-      try {
-        const res = await fetch(`${AUTH_WORKER_URL}/token`, {
-          headers: { Authorization: `Bearer ${sessionId}` },
-        });
-        if (!res.ok) {
-          if (res.status === 401) {
-            // Session got rejected — clear it so the UI shows Login again
-            try { localStorage.removeItem(LS_SESSION); } catch {}
-            setSessionId(null);
-            setToken(null);
-          }
-          return null;
-        }
-        const data = await res.json();
-        const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
-        setToken(data.access_token);
-        tokenExpiresAtRef.current = expiresAt;
-        if (data.email && data.email !== userEmail) {
-          setUserEmail(data.email);
-          try { localStorage.setItem(LS_USER_EMAIL, data.email); } catch {}
-        }
-        return data.access_token;
-      } catch {
-        return null;
-      } finally {
-        refreshingRef.current = null;
-      }
-    })();
-    refreshingRef.current = p;
-    return p;
-  }, [sessionId, userEmail]);
-
-  // First load (and any time sessionId changes) → fetch a fresh access token.
-  useEffect(() => {
-    if (sessionId) refreshAccessToken();
-    else setToken(null);
-  }, [sessionId, refreshAccessToken]);
 
   // Mouse wheel → horizontal scroll on priority feed
   useEffect(() => {
