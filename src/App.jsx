@@ -1340,10 +1340,6 @@ export default function App() {
         // Silent refresh failed or user dismissed — leave token null
       },
     });
-    // Try silent refresh if user previously consented but stored token is gone/expired
-    if (!loadStoredToken() && localStorage.getItem(LS_TOKEN)) {
-      try { tokenClient.current.requestAccessToken({ prompt: "none" }); } catch {}
-    }
   }, [clientId]);
 
   const loadGsi = useCallback(() => {
