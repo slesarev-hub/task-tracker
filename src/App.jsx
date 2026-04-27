@@ -3037,7 +3037,9 @@ export default function App() {
             <div className="projects-grid">
               {data.projects.map((p) => {
                 const pTasks = data.tasks.filter((t) => t.projectId === p.id);
-                const activeTasks = pTasks.filter((t) => t.column !== "done" && t.column !== "cancelled");
+                // Same closed-branch rule as the priority feed: a task whose
+                // ancestor is done/cancelled doesn't count as active here either.
+                const activeTasks = pTasks.filter((t) => !isClosedBranch(t));
                 const activeCounts = {};
                 COLUMNS.forEach((c) => {
                   if (c.id !== "done" && c.id !== "cancelled") {
