@@ -649,10 +649,12 @@ function SortableTask(props) {
     id: props.task.id,
     data: { type: "task", task: props.task },
   });
+  // Only set opacity inline while dragging — inline styles override any CSS,
+  // and we need .col-done / .col-cancelled to dim done/cancelled cards via CSS.
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.4 : 1,
+    ...(isDragging ? { opacity: 0.4 } : {}),
   };
   return (
     <TaskCardBody
