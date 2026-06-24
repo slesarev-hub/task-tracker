@@ -93,10 +93,32 @@ const mergeData = (local, remote) => {
     return merged;
   };
 
+  // Trackers merge like other items, except `marks` is unioned (a day marked
+  // done on either device stays done) rather than last-write-wins. Consistent
+  // with the app's non-lossy philosophy — un-marking doesn't propagate, same
+  // accepted tradeoff as task deletes.
+  const mergeTrackers = (localItems, remoteItems) => {
+    const localById = new Map((localItems || []).map((i) => [i.id, i]));
+    const remoteById = new Map((remoteItems || []).map((i) => [i.id, i]));
+    const allIds = new Set([...localById.keys(), ...remoteById.keys()]);
+    const merged = [];
+    for (const id of allIds) {
+      const l = localById.get(id);
+      const r = remoteById.get(id);
+      if (l && r) {
+        const winner = (l.updatedAt || "") >= (r.updatedAt || "") ? l : r;
+        const marks = [...new Set([...(l.marks || []), ...(r.marks || [])])].sort();
+        merged.push({ ...winner, marks });
+      } else merged.push(l || r);
+    }
+    return merged;
+  };
+
   return {
     projects: mergeItems(local.projects, remote.projects),
     tasks: mergeItems(local.tasks, remote.tasks),
     notes: mergeItems(local.notes || [], remote.notes || []),
+    trackers: mergeTrackers(local.trackers || [], remote.trackers || []),
   };
 };
 
@@ -133,6 +155,86 @@ const PRIORITY_RANK = { urgent: 0, soon: 1, none: 2 };
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const now = () => new Date().toISOString();
+
+// ── Daily trackers: model helpers ────────────────────────────────────────────
+// A tracker is a daily thing (pills, a habit) with a start date and a duration.
+// Its end date is derived, and `marks` is a flat list of "YYYY-MM-DD" strings
+// for the days marked done (binary).
+const DURATION_UNITS = [
+  { id: "day", label: "days" },
+  { id: "week", label: "weeks" },
+  { id: "month", label: "months" },
+  { id: "year", label: "years" },
+];
+const TRACKER_COLORS = ["#22c55e", "#3b82f6", "#a855f7", "#ec4899", "#f59e0b", "#14b8a6", "#ef4444"];
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Local-midnight Date from "YYYY-MM-DD" (avoids the UTC off-by-one new Date(str) gives).
+const parseDay = (s) => {
+  if (!s) return null;
+  const [y, m, d] = String(s).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+};
+// "YYYY-MM-DD" for a Date, in local time.
+const toDay = (dt) => {
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const d = String(dt.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+const todayStr = () => toDay(new Date());
+const addDays = (dt, n) => { const d = new Date(dt); d.setDate(d.getDate() + n); return d; };
+const dayDiff = (aStr, bStr) => {
+  const a = parseDay(aStr), b = parseDay(bStr);
+  if (!a || !b) return 0;
+  return Math.round((b - a) / 86400000);
+};
+// Exclusive end of a course: start + (value × unit). Last covered day is the day before.
+const durationEndExclusive = (startStr, value, unit) => {
+  const start = parseDay(startStr);
+  if (!start) return null;
+  const v = Math.max(1, Math.floor(Number(value) || 0));
+  const d = new Date(start);
+  if (unit === "week") d.setDate(d.getDate() + v * 7);
+  else if (unit === "month") d.setMonth(d.getMonth() + v);
+  else if (unit === "year") d.setFullYear(d.getFullYear() + v);
+  else d.setDate(d.getDate() + v); // "day" (default)
+  return d;
+};
+// Last inclusive day of the course, "YYYY-MM-DD".
+const trackerLastDay = (t) => {
+  const end = durationEndExclusive(t.startDate, t.durationValue, t.durationUnit);
+  return end ? toDay(addDays(end, -1)) : t.startDate;
+};
+const markSet = (t) => new Set(Array.isArray(t.marks) ? t.marks : []);
+const fmtDay = (str) => { const d = parseDay(str); return d ? `${MONTH_ABBR[d.getMonth()]} ${d.getDate()}` : ""; };
+const unitLabel = (value, unit) => `${value} ${Number(value) === 1 ? unit : unit + "s"}`;
+
+// Derived stats for a tracker relative to `today`.
+const trackerStats = (t, today = todayStr()) => {
+  const start = t.startDate;
+  const last = trackerLastDay(t);
+  const total = start && last ? Math.max(0, dayDiff(start, last) + 1) : 0;
+  const marks = markSet(t);
+  let done = 0;
+  for (const m of marks) if (m >= start && m <= last) done++;
+  const notStarted = today < start;
+  const ended = today > last;
+  // Days remaining including today (0 once the course has ended).
+  const remaining = ended ? 0 : notStarted ? total : Math.max(0, dayDiff(today, last) + 1);
+  // Current streak: consecutive marked days counting back from today. If today
+  // isn't marked yet, count back from yesterday so a day-in-progress doesn't
+  // break the streak.
+  let streak = 0;
+  let cursor = marks.has(today) ? today : toDay(addDays(new Date(), -1));
+  while (cursor >= start && cursor <= last && marks.has(cursor)) {
+    streak++;
+    cursor = toDay(addDays(parseDay(cursor), -1));
+  }
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  return { total, done, remaining, notStarted, ended, last, streak, pct };
+};
 
 // Tab → 2 spaces, Shift+Tab → outdent. Uses document.execCommand so the change
 // goes through the browser's native input pipeline — preserves the undo stack
@@ -298,6 +400,18 @@ const noteToRow = (n) => [
   n.createdAt || "",
   n.updatedAt || "",
 ];
+const TRACKERS_HEADER = ["id", "name", "color", "startDate", "durationValue", "durationUnit", "marks", "createdAt", "updatedAt"];
+const trackerToRow = (t) => [
+  t.id || "",
+  t.name || "",
+  t.color || "",
+  t.startDate || "",
+  String(t.durationValue ?? ""),
+  t.durationUnit || "day",
+  JSON.stringify(Array.isArray(t.marks) ? t.marks : []),
+  t.createdAt || "",
+  t.updatedAt || "",
+];
 
 const createSpreadsheet = async (token) => {
   const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
@@ -309,22 +423,24 @@ const createSpreadsheet = async (token) => {
         { properties: { title: "Projects" } },
         { properties: { title: "Tasks" } },
         { properties: { title: "Notes" } },
+        { properties: { title: "Trackers" } },
       ],
     }),
   });
   if (!r.ok) throw new Error("Cannot create spreadsheet");
   return (await r.json()).spreadsheetId;
 };
-// Cache of spreadsheet IDs where we've already confirmed the Notes tab exists,
+// Cache of "<sid>:<sheetName>" where we've already confirmed the tab exists,
 // so we don't hit the API on every diff push.
-const _ensuredNotesSheets = new Set();
-// Ensure the Notes sheet exists in an existing spreadsheet (idempotent)
-const ensureNotesSheet = async (token, sid) => {
-  if (_ensuredNotesSheets.has(sid)) return true;
+const _ensuredSheets = new Set();
+// Ensure a sheet/tab exists in an existing spreadsheet (idempotent).
+const ensureSheet = async (token, sid, name) => {
+  const key = `${sid}:${name}`;
+  if (_ensuredSheets.has(key)) return true;
   try {
-    // Try to read the Notes sheet; if it fails, assume it doesn't exist
-    await sheetsGet(token, sid, "Notes!A1:A1");
-    _ensuredNotesSheets.add(sid);
+    // Try to read the sheet; if it fails, assume it doesn't exist
+    await sheetsGet(token, sid, `${name}!A1:A1`);
+    _ensuredSheets.add(key);
     return true;
   } catch {
     // Create via batchUpdate
@@ -335,12 +451,12 @@ const ensureNotesSheet = async (token, sid) => {
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            requests: [{ addSheet: { properties: { title: "Notes" } } }],
+            requests: [{ addSheet: { properties: { title: name } } }],
           }),
         }
       );
       if (r.ok) {
-        _ensuredNotesSheets.add(sid);
+        _ensuredSheets.add(key);
         return true;
       }
       return false;
@@ -349,6 +465,8 @@ const ensureNotesSheet = async (token, sid) => {
     }
   }
 };
+const ensureNotesSheet = (token, sid) => ensureSheet(token, sid, "Notes");
+const ensureTrackersSheet = (token, sid) => ensureSheet(token, sid, "Trackers");
 // Migrate legacy embedded subtasks into flat tasks with parentId
 const migrateTasks = (rawTasks) => {
   const out = [];
@@ -383,11 +501,12 @@ const migrateTasks = (rawTasks) => {
 // Read sheets and return data plus per-id → row-index maps.
 // Empty rows (no id) are skipped but their row slot is not reused.
 const readFromSheets = async (token, sid) => {
-  const [projRes, taskRes, notesRes] = await Promise.all([
+  const [projRes, taskRes, notesRes, trackRes] = await Promise.all([
     sheetsGet(token, sid, "Projects!A2:E"),
     sheetsGet(token, sid, "Tasks!A2:J"),
-    // Notes sheet may not exist in older spreadsheets — treat failure as empty
+    // Notes / Trackers sheets may not exist in older spreadsheets — treat as empty
     sheetsGet(token, sid, "Notes!A2:G").catch(() => ({ values: [] })),
+    sheetsGet(token, sid, "Trackers!A2:I").catch(() => ({ values: [] })),
   ]);
   const projects = [];
   const projRowMap = new Map();
@@ -445,21 +564,49 @@ const readFromSheets = async (token, sid) => {
     });
     notesRowMap.set(id, idx + 2);
   });
+  const trackers = [];
+  const trackersRowMap = new Map();
+  (trackRes.values || []).forEach((row, idx) => {
+    if (!row || !row[0]) return;
+    const [id, name, color, startDate, durationValue, durationUnit, marksJson, createdAt, updatedAt] = row;
+    let marks = [];
+    if (marksJson) {
+      try {
+        const arr = JSON.parse(marksJson);
+        if (Array.isArray(arr)) marks = arr;
+      } catch {}
+    }
+    trackers.push({
+      id,
+      name: name || "",
+      color: color || TRACKER_COLORS[0],
+      startDate: startDate || "",
+      durationValue: parseInt(durationValue, 10) || 1,
+      durationUnit: durationUnit || "day",
+      marks,
+      createdAt,
+      updatedAt,
+    });
+    trackersRowMap.set(id, idx + 2);
+  });
   return {
     projects,
     tasks,
     notes,
-    rowMaps: { projects: projRowMap, tasks: taskRowMap, notes: notesRowMap },
+    trackers,
+    rowMaps: { projects: projRowMap, tasks: taskRowMap, notes: notesRowMap, trackers: trackersRowMap },
   };
 };
 
 // Full rewrite: only used for first-time init and Force push escape hatch.
 const writeToSheets = async (token, sid, data) => {
-  // Make sure Notes tab exists before we try to write to it
+  // Make sure the optional tabs exist before we try to write to them
   await ensureNotesSheet(token, sid);
+  await ensureTrackersSheet(token, sid);
   await sheetsClear(token, sid, "Projects!A1:Z");
   await sheetsClear(token, sid, "Tasks!A1:Z");
   await sheetsClear(token, sid, "Notes!A1:Z");
+  await sheetsClear(token, sid, "Trackers!A1:Z");
   await sheetsUpdate(token, sid, "Projects!A1", [
     PROJECTS_HEADER,
     ...data.projects.map(projectToRow),
@@ -472,6 +619,10 @@ const writeToSheets = async (token, sid, data) => {
     NOTES_HEADER,
     ...(data.notes || []).map(noteToRow),
   ]);
+  await sheetsUpdate(token, sid, "Trackers!A1", [
+    TRACKERS_HEADER,
+    ...(data.trackers || []).map(trackerToRow),
+  ]);
 };
 
 // Push only the diff between a prev baseline and the next state.
@@ -479,18 +630,21 @@ const writeToSheets = async (token, sid, data) => {
 // appends return their assigned row. The caller must have already populated
 // rowMap via a successful readFromSheets or force rewrite.
 const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
-  // Make sure the Notes tab exists before we try to write to it — cached so
-  // this is a no-op after the first call per spreadsheet.
+  // Make sure the optional tabs exist before we try to write to them — cached
+  // so this is a no-op after the first call per spreadsheet.
   await ensureNotesSheet(token, sid);
+  await ensureTrackersSheet(token, sid);
   const batchData = [
     // Always keep the header in sync — cheap and idempotent.
     { range: "Projects!A1:E1", values: [PROJECTS_HEADER] },
     { range: "Tasks!A1:J1", values: [TASKS_HEADER] },
     { range: "Notes!A1:G1", values: [NOTES_HEADER] },
+    { range: "Trackers!A1:I1", values: [TRACKERS_HEADER] },
   ];
   const appendProjects = [];
   const appendTasks = [];
   const appendNotes = [];
+  const appendTrackers = [];
 
   const diffItems = (prevItems, nextItems, sheetName, cols, toRow, isChanged, map, appendBucket) => {
     const prevById = new Map((prevItems || []).map((i) => [i.id, i]));
@@ -537,10 +691,19 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
     a.title !== b.title ||
     (a.taskId || "") !== (b.taskId || "") ||
     (a.body || "") !== (b.body || "");
+  const trackerChanged = (a, b) =>
+    a.updatedAt !== b.updatedAt ||
+    a.name !== b.name ||
+    a.color !== b.color ||
+    a.startDate !== b.startDate ||
+    a.durationValue !== b.durationValue ||
+    a.durationUnit !== b.durationUnit ||
+    JSON.stringify(a.marks || []) !== JSON.stringify(b.marks || []);
 
   diffItems(prev.projects, next.projects, "Projects", 5, projectToRow, projectChanged, rowMap.projects, appendProjects);
   diffItems(prev.tasks, next.tasks, "Tasks", 10, taskToRow, taskChanged, rowMap.tasks, appendTasks);
   diffItems(prev.notes || [], next.notes || [], "Notes", 7, noteToRow, noteChanged, rowMap.notes || new Map(), appendNotes);
+  diffItems(prev.trackers || [], next.trackers || [], "Trackers", 9, trackerToRow, trackerChanged, rowMap.trackers || new Map(), appendTrackers);
 
   if (batchData.length > 2) {
     // More than just headers → actually write
@@ -568,6 +731,13 @@ const diffPushToSheets = async (token, sid, prev, next, rowMap) => {
     const rng = res?.updates?.updatedRange || "";
     const m = rng.match(/!A(\d+)/);
     if (m) rowMap.notes.set(n.id, parseInt(m[1], 10));
+  }
+  if (!rowMap.trackers) rowMap.trackers = new Map();
+  for (const t of appendTrackers) {
+    const res = await sheetsAppend(token, sid, "Trackers!A1:I1", [trackerToRow(t)]);
+    const rng = res?.updates?.updatedRange || "";
+    const m = rng.match(/!A(\d+)/);
+    if (m) rowMap.trackers.set(t.id, parseInt(m[1], 10));
   }
 };
 
@@ -759,6 +929,8 @@ function Column({
 // ── Hash routing ─────────────────────────────────────────────────────────────
 const parseHash = () => {
   const h = (typeof window !== "undefined" ? window.location.hash.slice(1) : "") || "/";
+  // /daily — top-level daily trackers view
+  if (h === "/daily") return { view: "trackers", activeProjectId: null, viewingTaskId: null, projectMode: "board", activeNoteId: null };
   // /p/:id/notes/:noteId
   const mn = h.match(/^\/p\/([^/?#]+)\/notes(?:\/([^/?#]+))?$/);
   if (mn) return { view: "board", activeProjectId: mn[1], viewingTaskId: null, projectMode: "notes", activeNoteId: mn[2] || null };
@@ -768,6 +940,7 @@ const parseHash = () => {
   return { view: "projects", activeProjectId: null, viewingTaskId: null, projectMode: "board", activeNoteId: null };
 };
 const buildHash = (view, activeProjectId, viewingTaskId, projectMode, activeNoteId) => {
+  if (view === "trackers") return "#/daily";
   if (view === "board" && activeProjectId) {
     if (projectMode === "notes") {
       return activeNoteId
@@ -781,20 +954,103 @@ const buildHash = (view, activeProjectId, viewingTaskId, projectMode, activeNote
   return "#/";
 };
 
+// GitHub-style contribution heatmap for one tracker. Weeks are columns,
+// weekdays are rows (Sun→Sat, like GitHub). Clicking an in-range cell toggles it.
+const HEATMAP_WEEKDAYS = ["", "Mon", "", "Wed", "", "Fri", ""]; // labels for Sun..Sat rows
+function TrackerHeatmap({ tracker, onToggle, today }) {
+  const start = parseDay(tracker.startDate);
+  const lastStr = trackerLastDay(tracker);
+  const last = parseDay(lastStr);
+  if (!start || !last || last < start) return null;
+  const marks = markSet(tracker);
+  // Pad to whole weeks: grid starts on the Sunday of the start week and ends on
+  // the Saturday of the last week.
+  const gridStart = addDays(start, -start.getDay());
+  const gridEnd = addDays(last, 6 - last.getDay());
+  const weeks = [];
+  const monthLabels = [];
+  let cur = gridStart;
+  let prevMonth = -1;
+  while (cur <= gridEnd) {
+    const week = [];
+    for (let i = 0; i < 7; i++) {
+      const ds = toDay(cur);
+      week.push({
+        ds,
+        inRange: ds >= tracker.startDate && ds <= lastStr,
+        done: marks.has(ds),
+        isToday: ds === today,
+        isFuture: ds > today,
+      });
+      cur = addDays(cur, 1);
+    }
+    // Month label over a column when its first in-range day starts a new month.
+    const firstReal = week.find((c) => c.inRange) || week[0];
+    const mo = parseDay(firstReal.ds).getMonth();
+    monthLabels.push(mo !== prevMonth ? MONTH_ABBR[mo] : "");
+    prevMonth = mo;
+    weeks.push(week);
+  }
+  const color = tracker.color || TRACKER_COLORS[0];
+  return (
+    <div className="heatmap">
+      <div className="heatmap-inner">
+        <div className="heatmap-weekdays">
+          <div className="heatmap-month-spacer" />
+          {HEATMAP_WEEKDAYS.map((l, i) => (
+            <div key={i} className="heatmap-weekday">{l}</div>
+          ))}
+        </div>
+        <div className="heatmap-body">
+          <div className="heatmap-months">
+            {monthLabels.map((m, wi) => (
+              <div key={wi} className="heatmap-month">{m}</div>
+            ))}
+          </div>
+          <div className="heatmap-cols">
+            {weeks.map((week, wi) => (
+              <div key={wi} className="heatmap-col">
+                {week.map((cell) => (
+                  <button
+                    key={cell.ds}
+                    type="button"
+                    disabled={!cell.inRange}
+                    className={
+                      "heatmap-cell" +
+                      (!cell.inRange ? " out" : "") +
+                      (cell.done ? " done" : "") +
+                      (cell.isToday ? " today" : "") +
+                      (cell.isFuture && cell.inRange && !cell.done ? " future" : "")
+                    }
+                    style={cell.inRange && cell.done ? { background: color } : undefined}
+                    title={cell.inRange ? `${cell.ds}${cell.done ? " ✓" : ""}` : ""}
+                    onClick={() => cell.inRange && onToggle(tracker.id, cell.ds)}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [data, setData] = useState(() => {
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return { projects: [], tasks: [], notes: [] };
+      if (!raw) return { projects: [], tasks: [], notes: [], trackers: [] };
       const parsed = JSON.parse(raw);
       return {
         ...parsed,
         tasks: migrateTasks(parsed.tasks),
         notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+        trackers: Array.isArray(parsed.trackers) ? parsed.trackers : [],
       };
     } catch {
-      return { projects: [], tasks: [], notes: [] };
+      return { projects: [], tasks: [], notes: [], trackers: [] };
     }
   });
   const initialRoute = parseHash();
@@ -1149,6 +1405,9 @@ export default function App() {
   const [mobileCol, setMobileCol] = useState("todo");
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  // Daily trackers: editor modal draft (null when closed) and pending delete id.
+  const [trackerDraft, setTrackerDraft] = useState(null);
+  const [confirmDeleteTrackerId, setConfirmDeleteTrackerId] = useState(null);
 
   // Google sync state — auth handled by our Cloudflare Worker now
   const [syncStatus, setSyncStatus] = useState("idle");
@@ -1172,8 +1431,8 @@ export default function App() {
   const notesFeedRef = useRef(null);
   const syncFromSheetsRef = useRef(null);
   // Per-row sync bookkeeping
-  const rowMapRef = useRef({ projects: new Map(), tasks: new Map(), notes: new Map() });
-  const prevSyncedRef = useRef({ projects: [], tasks: [], notes: [] });
+  const rowMapRef = useRef({ projects: new Map(), tasks: new Map(), notes: new Map(), trackers: new Map() });
+  const prevSyncedRef = useRef({ projects: [], tasks: [], notes: [], trackers: [] });
   const syncedOnceRef = useRef(false);
   const pushTimerRef = useRef(null);
   const pendingSaveRef = useRef(null);
@@ -1457,7 +1716,12 @@ export default function App() {
           alert("Invalid JSON: expected { projects: [...], tasks: [...] }");
           return;
         }
-        const migrated = { projects: parsed.projects, tasks: migrateTasks(parsed.tasks) };
+        const migrated = {
+          projects: parsed.projects,
+          tasks: migrateTasks(parsed.tasks),
+          notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+          trackers: Array.isArray(parsed.trackers) ? parsed.trackers : [],
+        };
         const merged = mergeData(dataRef.current, migrated);
         save(merged);
       } catch (e) {
@@ -1481,7 +1745,9 @@ export default function App() {
       (dataRef.current.tasks || []).forEach((t, i) => taskRows.set(t.id, i + 2));
       const noteRows = new Map();
       (dataRef.current.notes || []).forEach((n, i) => noteRows.set(n.id, i + 2));
-      rowMapRef.current = { projects: projRows, tasks: taskRows, notes: noteRows };
+      const trackerRows = new Map();
+      (dataRef.current.trackers || []).forEach((t, i) => trackerRows.set(t.id, i + 2));
+      rowMapRef.current = { projects: projRows, tasks: taskRows, notes: noteRows, trackers: trackerRows };
       prevSyncedRef.current = dataRef.current;
       syncedOnceRef.current = true;
       try { localStorage.setItem(LS_LAST_SYNC, String(Date.now())); } catch {}
@@ -1502,6 +1768,7 @@ export default function App() {
         projects: remote.projects,
         tasks: remote.tasks,
         notes: remote.notes || [],
+        trackers: remote.trackers || [],
       };
       const merged = mergeData(dataRef.current, remoteData);
       setData(merged);
@@ -1574,12 +1841,73 @@ export default function App() {
   const confirmDeleteProject = () => {
     if (!confirmDeleteId) return;
     save({
+      ...data,
       projects: data.projects.filter((p) => p.id !== confirmDeleteId),
       tasks: data.tasks.filter((t) => t.projectId !== confirmDeleteId),
+      notes: (data.notes || []).filter((n) => n.projectId !== confirmDeleteId),
     });
     setConfirmDeleteId(null);
   };
   const openProject = (pid) => { setActiveProjectId(pid); setView("board"); };
+
+  // ── Daily tracker CRUD ───────────────────────────────────────────────────
+  const openTrackerNew = () =>
+    setTrackerDraft({
+      id: null,
+      name: "",
+      color: TRACKER_COLORS[0],
+      startDate: todayStr(),
+      durationValue: 30,
+      durationUnit: "day",
+    });
+  const openTrackerEdit = (t) =>
+    setTrackerDraft({
+      id: t.id,
+      name: t.name || "",
+      color: t.color || TRACKER_COLORS[0],
+      startDate: t.startDate || todayStr(),
+      durationValue: t.durationValue || 1,
+      durationUnit: t.durationUnit || "day",
+    });
+  const saveTrackerDraft = () => {
+    const d = trackerDraft;
+    if (!d || !d.name.trim() || !d.startDate) return;
+    const t = now();
+    const value = Math.max(1, Math.floor(Number(d.durationValue) || 1));
+    const trackers = data.trackers || [];
+    let next;
+    if (d.id) {
+      next = trackers.map((x) =>
+        x.id === d.id
+          ? { ...x, name: d.name.trim(), color: d.color, startDate: d.startDate, durationValue: value, durationUnit: d.durationUnit, updatedAt: t }
+          : x
+      );
+    } else {
+      next = [
+        ...trackers,
+        { id: uid(), name: d.name.trim(), color: d.color, startDate: d.startDate, durationValue: value, durationUnit: d.durationUnit, marks: [], createdAt: t, updatedAt: t },
+      ];
+    }
+    save({ ...data, trackers: next });
+    setTrackerDraft(null);
+  };
+  const confirmDeleteTracker = () => {
+    if (!confirmDeleteTrackerId) return;
+    save({ ...data, trackers: (data.trackers || []).filter((t) => t.id !== confirmDeleteTrackerId) });
+    setConfirmDeleteTrackerId(null);
+  };
+  // Toggle a single day done/not-done on a tracker (binary).
+  const toggleTrackerMark = useCallback((trackerId, dayStr) => {
+    const trackers = dataRef.current.trackers || [];
+    const next = trackers.map((t) => {
+      if (t.id !== trackerId) return t;
+      const set = new Set(Array.isArray(t.marks) ? t.marks : []);
+      if (set.has(dayStr)) set.delete(dayStr);
+      else set.add(dayStr);
+      return { ...t, marks: [...set].sort(), updatedAt: now() };
+    });
+    save({ ...dataRef.current, trackers: next });
+  }, [save]);
 
   // ── Task CRUD ────────────────────────────────────────────────────────────
   const addTask = (columnId, parentTask = null) => {
@@ -1836,6 +2164,8 @@ export default function App() {
 
   const draggedTask = activeId ? data.tasks.find((t) => t.id === activeId) : null;
   const deleteProjectName = confirmDeleteId ? data.projects.find((p) => p.id === confirmDeleteId)?.name : "";
+  const today = todayStr();
+  const trackers = data.trackers || [];
 
   // Priority feed: all active tasks from all projects, sorted by priority
   // A task is "active" only if neither it nor any of its ancestors is in the
@@ -2871,6 +3201,90 @@ export default function App() {
         .setup-panel input:focus { border-color: #3b82f6; }
         .setup-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 
+        /* Daily trackers */
+        .trackers-view { display: flex; flex-direction: column; }
+        .trackers-list { display: flex; flex-direction: column; gap: 16px; }
+        .tracker-card {
+          background: #161820; border: 1px solid #2a2d38; border-radius: 12px;
+          padding: 16px; position: relative;
+        }
+        .tracker-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+        .tracker-dot { width: 12px; height: 12px; border-radius: 3px; margin-top: 4px; flex-shrink: 0; }
+        .tracker-title-wrap { flex: 1; min-width: 0; }
+        .tracker-name { font-size: 16px; font-weight: 600; color: #e8eaf0; }
+        .tracker-range { font-size: 12px; color: #6b7280; margin-top: 2px; }
+        .tracker-actions { display: flex; gap: 2px; flex-shrink: 0; }
+        .tracker-stats {
+          display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+          font-size: 12px; color: #9ca3af; margin-bottom: 12px;
+        }
+        .tracker-stat b { color: #e8eaf0; font-weight: 700; }
+        .tracker-progress {
+          flex: 1; min-width: 60px; height: 6px; background: #0d0f14;
+          border-radius: 3px; overflow: hidden;
+        }
+        .tracker-progress-fill { display: block; height: 100%; border-radius: 3px; transition: width 0.2s; }
+        .tracker-today-btn {
+          margin-top: 12px; width: 100%; padding: 10px; border-radius: 8px;
+          background: #0d0f14; border: 1px solid #2a2d38; color: #e8eaf0;
+          font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+        }
+        .tracker-today-btn:hover:not(:disabled) { border-color: #3b82f6; }
+        .tracker-today-btn.done { color: #0d0f14; }
+        .tracker-today-btn:disabled { opacity: 0.5; cursor: default; }
+        .tracker-add-card { min-height: 60px; }
+
+        /* Heatmap */
+        .heatmap { overflow-x: auto; padding-bottom: 4px; }
+        .heatmap-inner { display: flex; gap: 4px; width: max-content; }
+        .heatmap-weekdays { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
+        .heatmap-month-spacer { height: 14px; }
+        .heatmap-weekday {
+          height: 13px; font-size: 9px; line-height: 13px; color: #6b7280;
+          padding-right: 4px; text-align: right; width: 26px;
+        }
+        .heatmap-body { display: flex; flex-direction: column; gap: 3px; }
+        .heatmap-months { display: flex; gap: 3px; height: 14px; }
+        .heatmap-month { width: 13px; font-size: 9px; line-height: 14px; color: #6b7280; white-space: nowrap; }
+        .heatmap-cols { display: flex; gap: 3px; }
+        .heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+        .heatmap-cell {
+          width: 13px; height: 13px; border-radius: 2px; padding: 0; border: none;
+          background: #21262d; cursor: pointer; transition: outline 0.1s;
+        }
+        .heatmap-cell:hover:not(:disabled) { outline: 1px solid #6b7280; }
+        .heatmap-cell.out { background: transparent; cursor: default; visibility: hidden; }
+        .heatmap-cell.future { background: #161820; }
+        .heatmap-cell.today { outline: 1.5px solid #e8eaf0; outline-offset: 0; }
+
+        /* Tracker editor modal */
+        .tracker-color-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        .tracker-color-swatch {
+          width: 26px; height: 26px; border-radius: 6px; border: 2px solid transparent;
+          cursor: pointer; padding: 0;
+        }
+        .tracker-color-swatch.active { border-color: #e8eaf0; }
+        .tracker-field-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+        .tracker-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 130px; }
+        .tracker-field-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #6b7280; }
+        .tracker-field input[type="date"] {
+          background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          padding: 8px 10px; color: #e8eaf0; font-size: 13px; outline: none;
+          color-scheme: dark; width: 100%;
+        }
+        .tracker-duration-inputs { display: flex; gap: 6px; }
+        .tracker-duration-inputs input {
+          width: 70px; background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          padding: 8px 10px; color: #e8eaf0; font-size: 13px; outline: none;
+        }
+        .tracker-duration-inputs select {
+          flex: 1; background: #0d0f14; border: 1px solid #2a2d38; border-radius: 6px;
+          padding: 8px 10px; color: #e8eaf0; font-size: 13px; outline: none; cursor: pointer;
+        }
+        .tracker-field input:focus, .tracker-duration-inputs input:focus, .tracker-duration-inputs select:focus { border-color: #3b82f6; }
+        .tracker-calc-hint { font-size: 13px; color: #9ca3af; margin: 4px 0 8px; }
+        .tracker-calc-hint strong { color: #e8eaf0; }
+
         /* Mobile */
         @media (max-width: 640px) {
           .app { padding: 10px; padding-bottom: env(safe-area-inset-bottom, 10px); }
@@ -2887,14 +3301,23 @@ export default function App() {
         {/* Header */}
         <div className="header">
           <h1>
-            {view === "board" && (
+            {(view === "board" || view === "trackers") && (
               <button className="back-btn" onClick={() => setView("projects")} title="Back to projects">
                 &larr;
               </button>
             )}
-            {view === "projects" ? "Task Tracker" : activeProject?.name || "Board"}
+            {view === "projects" ? "Task Tracker" : view === "trackers" ? "Daily" : activeProject?.name || "Board"}
           </h1>
           <div className="header-right">
+            {view === "projects" && (
+              <button
+                className="btn-sm"
+                onClick={() => setView("trackers")}
+                title="Daily trackers"
+              >
+                &#9636; Daily
+              </button>
+            )}
             <div className="status-pills">
               {!isOnline && <span className="offline-badge">offline</span>}
               <span
@@ -3514,6 +3937,67 @@ export default function App() {
           </div>
         )}
 
+        {/* Daily trackers view */}
+        {view === "trackers" && (
+          <div className="trackers-view">
+            {trackers.length === 0 && (
+              <div className="empty-state">
+                <p>No daily trackers yet. Track pills, habits — anything you do day to day.</p>
+              </div>
+            )}
+            <div className="trackers-list">
+              {trackers.map((t) => {
+                const st = trackerStats(t, today);
+                const markedToday = markSet(t).has(today);
+                const canMarkToday = today >= t.startDate && today <= st.last;
+                const sameYear = parseDay(t.startDate)?.getFullYear() === parseDay(st.last)?.getFullYear();
+                return (
+                  <div key={t.id} className="tracker-card">
+                    <div className="tracker-head">
+                      <span className="tracker-dot" style={{ background: t.color }} />
+                      <div className="tracker-title-wrap">
+                        <div className="tracker-name">{t.name || "Untitled"}</div>
+                        <div className="tracker-range">
+                          {fmtDay(t.startDate)} &rarr; {fmtDay(st.last)}
+                          {!sameYear && `, ${parseDay(st.last)?.getFullYear()}`}
+                          {" · "}
+                          {unitLabel(t.durationValue, t.durationUnit)}
+                        </div>
+                      </div>
+                      <div className="tracker-actions">
+                        <button className="btn-icon" onClick={() => openTrackerEdit(t)} title="Edit">&#9998;</button>
+                        <button className="btn-icon btn-del" onClick={() => setConfirmDeleteTrackerId(t.id)} title="Delete">&times;</button>
+                      </div>
+                    </div>
+                    <div className="tracker-stats">
+                      <span className="tracker-stat"><b>{st.done}</b>/{st.total} done</span>
+                      <span className="tracker-stat">
+                        {st.ended ? "ended" : st.notStarted ? "not started" : `${st.remaining} day${st.remaining === 1 ? "" : "s"} left`}
+                      </span>
+                      {st.streak > 0 && <span className="tracker-stat">&#128293; {st.streak} streak</span>}
+                      <span className="tracker-progress" title={`${st.pct}%`}>
+                        <span className="tracker-progress-fill" style={{ width: `${st.pct}%`, background: t.color }} />
+                      </span>
+                    </div>
+                    <TrackerHeatmap tracker={t} onToggle={toggleTrackerMark} today={today} />
+                    <button
+                      className={`tracker-today-btn${markedToday ? " done" : ""}`}
+                      onClick={() => toggleTrackerMark(t.id, today)}
+                      disabled={!canMarkToday}
+                      style={markedToday ? { background: t.color, borderColor: t.color } : undefined}
+                    >
+                      {st.notStarted ? `Starts ${fmtDay(t.startDate)}`
+                        : st.ended ? "Course ended"
+                        : markedToday ? "✓ Done today" : "Mark today done"}
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="add-card tracker-add-card" onClick={openTrackerNew}>+ New tracker</div>
+            </div>
+          </div>
+        )}
+
         {/* Floating Global Search Popover */}
         {globalSearchOpen && (
           <div className="global-search-popover" onClick={(e) => e.stopPropagation()}>
@@ -4010,6 +4494,94 @@ export default function App() {
               <div className="modal-actions">
                 <button onClick={() => setConfirmDeleteId(null)}>Cancel</button>
                 <button className="btn-danger" onClick={confirmDeleteProject}>Delete</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Add / Edit Tracker */}
+        {trackerDraft && (() => {
+          const d = trackerDraft;
+          const lastStr = trackerLastDay({ startDate: d.startDate, durationValue: d.durationValue, durationUnit: d.durationUnit });
+          const totalDays = d.startDate ? dayDiff(d.startDate, lastStr) + 1 : 0;
+          return (
+            <div className="modal-backdrop" onClick={() => setTrackerDraft(null)}>
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <h3>{d.id ? "Edit tracker" : "New tracker"}</h3>
+                <input
+                  autoFocus
+                  placeholder="Name (e.g. Vitamin D)"
+                  value={d.name}
+                  onChange={(e) => setTrackerDraft({ ...d, name: e.target.value })}
+                  onKeyDown={(e) => e.key === "Enter" && saveTrackerDraft()}
+                />
+                <div className="tracker-color-row">
+                  {TRACKER_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`tracker-color-swatch${d.color === c ? " active" : ""}`}
+                      style={{ background: c }}
+                      onClick={() => setTrackerDraft({ ...d, color: c })}
+                    />
+                  ))}
+                </div>
+                <div className="tracker-field-row">
+                  <label className="tracker-field">
+                    <span className="tracker-field-label">Start</span>
+                    <input
+                      type="date"
+                      value={d.startDate}
+                      onChange={(e) => setTrackerDraft({ ...d, startDate: e.target.value })}
+                    />
+                  </label>
+                  <label className="tracker-field">
+                    <span className="tracker-field-label">Duration</span>
+                    <div className="tracker-duration-inputs">
+                      <input
+                        type="number"
+                        min="1"
+                        value={d.durationValue}
+                        onChange={(e) => setTrackerDraft({ ...d, durationValue: e.target.value })}
+                      />
+                      <select
+                        value={d.durationUnit}
+                        onChange={(e) => setTrackerDraft({ ...d, durationUnit: e.target.value })}
+                      >
+                        {DURATION_UNITS.map((u) => (
+                          <option key={u.id} value={u.id}>{u.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </label>
+                </div>
+                {d.startDate && (
+                  <p className="tracker-calc-hint">
+                    Ends <strong>{fmtDay(lastStr)}</strong> · {totalDays} day{totalDays === 1 ? "" : "s"} total
+                  </p>
+                )}
+                <div className="modal-actions">
+                  <button onClick={() => setTrackerDraft(null)}>Cancel</button>
+                  <button className="btn-primary" onClick={saveTrackerDraft} disabled={!d.name.trim() || !d.startDate}>
+                    {d.id ? "Save" : "Create"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Modal: Confirm Delete Tracker */}
+        {confirmDeleteTrackerId && (
+          <div className="modal-backdrop" onClick={() => setConfirmDeleteTrackerId(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <h3>Delete tracker</h3>
+              <p className="modal-text">
+                Delete <strong>{trackers.find((t) => t.id === confirmDeleteTrackerId)?.name || "this tracker"}</strong> and all its marks? This cannot be undone.
+              </p>
+              <div className="modal-actions">
+                <button onClick={() => setConfirmDeleteTrackerId(null)}>Cancel</button>
+                <button className="btn-danger" onClick={confirmDeleteTracker}>Delete</button>
               </div>
             </div>
           </div>
