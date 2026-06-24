@@ -165,7 +165,9 @@ const DURATION_UNITS = [
   { id: "week", label: "weeks" },
   { id: "month", label: "months" },
   { id: "year", label: "years" },
+  { id: "endless", label: "endless (no end date)" },
 ];
+const isEndless = (t) => t.durationUnit === "endless";
 const TRACKER_COLORS = ["#22c55e", "#3b82f6", "#a855f7", "#ec4899", "#f59e0b", "#14b8a6", "#ef4444"];
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -202,8 +204,11 @@ const durationEndExclusive = (startStr, value, unit) => {
   else d.setDate(d.getDate() + v); // "day" (default)
   return d;
 };
-// Last inclusive day of the course, "YYYY-MM-DD".
-const trackerLastDay = (t) => {
+// Last inclusive day of the course, "YYYY-MM-DD". Endless trackers have no fixed
+// end, so callers pass `today` to get the effective last day (the heatmap and
+// stats grow as days pass). Falls back to start before the course begins.
+const trackerLastDay = (t, today = todayStr()) => {
+  if (isEndless(t)) return today >= t.startDate ? today : t.startDate;
   const end = durationEndExclusive(t.startDate, t.durationValue, t.durationUnit);
   return end ? toDay(addDays(end, -1)) : t.startDate;
 };
@@ -214,15 +219,17 @@ const unitLabel = (value, unit) => `${value} ${Number(value) === 1 ? unit : unit
 // Derived stats for a tracker relative to `today`.
 const trackerStats = (t, today = todayStr()) => {
   const start = t.startDate;
-  const last = trackerLastDay(t);
-  const total = start && last ? Math.max(0, dayDiff(start, last) + 1) : 0;
+  const endless = isEndless(t);
+  const last = trackerLastDay(t, today); // = today for an endless tracker
+  // Endless trackers have no total/remaining/percentage — they just accumulate.
+  const total = endless ? 0 : start && last ? Math.max(0, dayDiff(start, last) + 1) : 0;
   const marks = markSet(t);
   let done = 0;
   for (const m of marks) if (m >= start && m <= last) done++;
   const notStarted = today < start;
-  const ended = today > last;
-  // Days remaining including today (0 once the course has ended).
-  const remaining = ended ? 0 : notStarted ? total : Math.max(0, dayDiff(today, last) + 1);
+  const ended = endless ? false : today > last;
+  // Days remaining including today (null for endless, 0 once a course has ended).
+  const remaining = endless ? null : ended ? 0 : notStarted ? total : Math.max(0, dayDiff(today, last) + 1);
   // Current streak: consecutive marked days counting back from today. If today
   // isn't marked yet, count back from yesterday so a day-in-progress doesn't
   // break the streak.
@@ -232,8 +239,8 @@ const trackerStats = (t, today = todayStr()) => {
     streak++;
     cursor = toDay(addDays(parseDay(cursor), -1));
   }
-  const pct = total ? Math.round((done / total) * 100) : 0;
-  return { total, done, remaining, notStarted, ended, last, streak, pct };
+  const pct = endless ? null : total ? Math.round((done / total) * 100) : 0;
+  return { total, done, remaining, notStarted, ended, last, streak, pct, endless };
 };
 
 // Tab → 2 spaces, Shift+Tab → outdent. Uses document.execCommand so the change
@@ -959,7 +966,7 @@ const buildHash = (view, activeProjectId, viewingTaskId, projectMode, activeNote
 const HEATMAP_WEEKDAYS = ["", "Mon", "", "Wed", "", "Fri", ""]; // labels for Sun..Sat rows
 function TrackerHeatmap({ tracker, onToggle, today }) {
   const start = parseDay(tracker.startDate);
-  const lastStr = trackerLastDay(tracker);
+  const lastStr = trackerLastDay(tracker, today);
   const last = parseDay(lastStr);
   if (!start || !last || last < start) return null;
   const marks = markSet(tracker);
@@ -3958,10 +3965,16 @@ export default function App() {
                       <div className="tracker-title-wrap">
                         <div className="tracker-name">{t.name || "Untitled"}</div>
                         <div className="tracker-range">
-                          {fmtDay(t.startDate)} &rarr; {fmtDay(st.last)}
-                          {!sameYear && `, ${parseDay(st.last)?.getFullYear()}`}
-                          {" · "}
-                          {unitLabel(t.durationValue, t.durationUnit)}
+                          {st.endless ? (
+                            <>Since {fmtDay(t.startDate)} &middot; endless</>
+                          ) : (
+                            <>
+                              {fmtDay(t.startDate)} &rarr; {fmtDay(st.last)}
+                              {!sameYear && `, ${parseDay(st.last)?.getFullYear()}`}
+                              {" · "}
+                              {unitLabel(t.durationValue, t.durationUnit)}
+                            </>
+                          )}
                         </div>
                       </div>
                       <div className="tracker-actions">
@@ -3970,14 +3983,16 @@ export default function App() {
                       </div>
                     </div>
                     <div className="tracker-stats">
-                      <span className="tracker-stat"><b>{st.done}</b>/{st.total} done</span>
+                      <span className="tracker-stat"><b>{st.done}</b>{st.endless ? " done" : `/${st.total} done`}</span>
                       <span className="tracker-stat">
-                        {st.ended ? "ended" : st.notStarted ? "not started" : `${st.remaining} day${st.remaining === 1 ? "" : "s"} left`}
+                        {st.endless ? "ongoing" : st.ended ? "ended" : st.notStarted ? "not started" : `${st.remaining} day${st.remaining === 1 ? "" : "s"} left`}
                       </span>
                       {st.streak > 0 && <span className="tracker-stat">&#128293; {st.streak} streak</span>}
-                      <span className="tracker-progress" title={`${st.pct}%`}>
-                        <span className="tracker-progress-fill" style={{ width: `${st.pct}%`, background: t.color }} />
-                      </span>
+                      {!st.endless && (
+                        <span className="tracker-progress" title={`${st.pct}%`}>
+                          <span className="tracker-progress-fill" style={{ width: `${st.pct}%`, background: t.color }} />
+                        </span>
+                      )}
                     </div>
                     <TrackerHeatmap tracker={t} onToggle={toggleTrackerMark} today={today} />
                     <button
@@ -4502,8 +4517,9 @@ export default function App() {
         {/* Modal: Add / Edit Tracker */}
         {trackerDraft && (() => {
           const d = trackerDraft;
-          const lastStr = trackerLastDay({ startDate: d.startDate, durationValue: d.durationValue, durationUnit: d.durationUnit });
-          const totalDays = d.startDate ? dayDiff(d.startDate, lastStr) + 1 : 0;
+          const draftEndless = d.durationUnit === "endless";
+          const lastStr = draftEndless ? "" : trackerLastDay({ startDate: d.startDate, durationValue: d.durationValue, durationUnit: d.durationUnit });
+          const totalDays = !draftEndless && d.startDate ? dayDiff(d.startDate, lastStr) + 1 : 0;
           return (
             <div className="modal-backdrop" onClick={() => setTrackerDraft(null)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -4538,12 +4554,14 @@ export default function App() {
                   <label className="tracker-field">
                     <span className="tracker-field-label">Duration</span>
                     <div className="tracker-duration-inputs">
-                      <input
-                        type="number"
-                        min="1"
-                        value={d.durationValue}
-                        onChange={(e) => setTrackerDraft({ ...d, durationValue: e.target.value })}
-                      />
+                      {!draftEndless && (
+                        <input
+                          type="number"
+                          min="1"
+                          value={d.durationValue}
+                          onChange={(e) => setTrackerDraft({ ...d, durationValue: e.target.value })}
+                        />
+                      )}
                       <select
                         value={d.durationUnit}
                         onChange={(e) => setTrackerDraft({ ...d, durationUnit: e.target.value })}
@@ -4557,7 +4575,9 @@ export default function App() {
                 </div>
                 {d.startDate && (
                   <p className="tracker-calc-hint">
-                    Ends <strong>{fmtDay(lastStr)}</strong> · {totalDays} day{totalDays === 1 ? "" : "s"} total
+                    {draftEndless
+                      ? <>No end date · runs from <strong>{fmtDay(d.startDate)}</strong> onward</>
+                      : <>Ends <strong>{fmtDay(lastStr)}</strong> · {totalDays} day{totalDays === 1 ? "" : "s"} total</>}
                   </p>
                 )}
                 <div className="modal-actions">
