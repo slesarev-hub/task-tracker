@@ -936,8 +936,6 @@ function Column({
 // ── Hash routing ─────────────────────────────────────────────────────────────
 const parseHash = () => {
   const h = (typeof window !== "undefined" ? window.location.hash.slice(1) : "") || "/";
-  // /daily — top-level daily trackers view
-  if (h === "/daily") return { view: "trackers", activeProjectId: null, viewingTaskId: null, projectMode: "board", activeNoteId: null };
   // /p/:id/notes/:noteId
   const mn = h.match(/^\/p\/([^/?#]+)\/notes(?:\/([^/?#]+))?$/);
   if (mn) return { view: "board", activeProjectId: mn[1], viewingTaskId: null, projectMode: "notes", activeNoteId: mn[2] || null };
@@ -947,7 +945,6 @@ const parseHash = () => {
   return { view: "projects", activeProjectId: null, viewingTaskId: null, projectMode: "board", activeNoteId: null };
 };
 const buildHash = (view, activeProjectId, viewingTaskId, projectMode, activeNoteId) => {
-  if (view === "trackers") return "#/daily";
   if (view === "board" && activeProjectId) {
     if (projectMode === "notes") {
       return activeNoteId
@@ -3209,7 +3206,7 @@ export default function App() {
         .setup-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 
         /* Daily trackers */
-        .trackers-view { display: flex; flex-direction: column; }
+        .daily-section { margin-top: 24px; }
         .trackers-list { display: flex; flex-direction: column; gap: 16px; }
         .tracker-card {
           background: #161820; border: 1px solid #2a2d38; border-radius: 12px;
@@ -3308,23 +3305,14 @@ export default function App() {
         {/* Header */}
         <div className="header">
           <h1>
-            {(view === "board" || view === "trackers") && (
+            {view === "board" && (
               <button className="back-btn" onClick={() => setView("projects")} title="Back to projects">
                 &larr;
               </button>
             )}
-            {view === "projects" ? "Task Tracker" : view === "trackers" ? "Daily" : activeProject?.name || "Board"}
+            {view === "projects" ? "Task Tracker" : activeProject?.name || "Board"}
           </h1>
           <div className="header-right">
-            {view === "projects" && (
-              <button
-                className="btn-sm"
-                onClick={() => setView("trackers")}
-                title="Daily trackers"
-              >
-                &#9636; Daily
-              </button>
-            )}
             <div className="status-pills">
               {!isOnline && <span className="offline-badge">offline</span>}
               <span
@@ -3520,6 +3508,72 @@ export default function App() {
               })}
               <div className="add-card" onClick={addProject}>+ New project</div>
             </div>
+
+            {/* Daily trackers — pills & habits, on the home screen under projects */}
+            <div className="daily-section">
+              <div className="priority-feed-header">
+                <span className="priority-feed-title">Daily</span>
+              </div>
+              <div className="trackers-list">
+                {trackers.map((t) => {
+                  const st = trackerStats(t, today);
+                  const markedToday = markSet(t).has(today);
+                  const canMarkToday = today >= t.startDate && today <= st.last;
+                  const sameYear = parseDay(t.startDate)?.getFullYear() === parseDay(st.last)?.getFullYear();
+                  return (
+                    <div key={t.id} className="tracker-card">
+                      <div className="tracker-head">
+                        <span className="tracker-dot" style={{ background: t.color }} />
+                        <div className="tracker-title-wrap">
+                          <div className="tracker-name">{t.name || "Untitled"}</div>
+                          <div className="tracker-range">
+                            {st.endless ? (
+                              <>Since {fmtDay(t.startDate)} &middot; endless</>
+                            ) : (
+                              <>
+                                {fmtDay(t.startDate)} &rarr; {fmtDay(st.last)}
+                                {!sameYear && `, ${parseDay(st.last)?.getFullYear()}`}
+                                {" · "}
+                                {unitLabel(t.durationValue, t.durationUnit)}
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <div className="tracker-actions">
+                          <button className="btn-icon" onClick={() => openTrackerEdit(t)} title="Edit">&#9998;</button>
+                          <button className="btn-icon btn-del" onClick={() => setConfirmDeleteTrackerId(t.id)} title="Delete">&times;</button>
+                        </div>
+                      </div>
+                      <div className="tracker-stats">
+                        <span className="tracker-stat"><b>{st.done}</b>{st.endless ? " done" : `/${st.total} done`}</span>
+                        <span className="tracker-stat">
+                          {st.endless ? "ongoing" : st.ended ? "ended" : st.notStarted ? "not started" : `${st.remaining} day${st.remaining === 1 ? "" : "s"} left`}
+                        </span>
+                        {st.streak > 0 && <span className="tracker-stat">&#128293; {st.streak} streak</span>}
+                        {!st.endless && (
+                          <span className="tracker-progress" title={`${st.pct}%`}>
+                            <span className="tracker-progress-fill" style={{ width: `${st.pct}%`, background: t.color }} />
+                          </span>
+                        )}
+                      </div>
+                      <TrackerHeatmap tracker={t} onToggle={toggleTrackerMark} today={today} />
+                      <button
+                        className={`tracker-today-btn${markedToday ? " done" : ""}`}
+                        onClick={() => toggleTrackerMark(t.id, today)}
+                        disabled={!canMarkToday}
+                        style={markedToday ? { background: t.color, borderColor: t.color } : undefined}
+                      >
+                        {st.notStarted ? `Starts ${fmtDay(t.startDate)}`
+                          : st.ended ? "Course ended"
+                          : markedToday ? "✓ Done today" : "Mark today done"}
+                      </button>
+                    </div>
+                  );
+                })}
+                <div className="add-card tracker-add-card" onClick={openTrackerNew}>+ New tracker</div>
+              </div>
+            </div>
+
             {recentNotes.length > 0 && (
               <div className="priority-feed-wrap recent-notes-wrap">
                 <div className="priority-feed-header">
@@ -3945,74 +3999,6 @@ export default function App() {
         )}
 
         {/* Daily trackers view */}
-        {view === "trackers" && (
-          <div className="trackers-view">
-            {trackers.length === 0 && (
-              <div className="empty-state">
-                <p>No daily trackers yet. Track pills, habits — anything you do day to day.</p>
-              </div>
-            )}
-            <div className="trackers-list">
-              {trackers.map((t) => {
-                const st = trackerStats(t, today);
-                const markedToday = markSet(t).has(today);
-                const canMarkToday = today >= t.startDate && today <= st.last;
-                const sameYear = parseDay(t.startDate)?.getFullYear() === parseDay(st.last)?.getFullYear();
-                return (
-                  <div key={t.id} className="tracker-card">
-                    <div className="tracker-head">
-                      <span className="tracker-dot" style={{ background: t.color }} />
-                      <div className="tracker-title-wrap">
-                        <div className="tracker-name">{t.name || "Untitled"}</div>
-                        <div className="tracker-range">
-                          {st.endless ? (
-                            <>Since {fmtDay(t.startDate)} &middot; endless</>
-                          ) : (
-                            <>
-                              {fmtDay(t.startDate)} &rarr; {fmtDay(st.last)}
-                              {!sameYear && `, ${parseDay(st.last)?.getFullYear()}`}
-                              {" · "}
-                              {unitLabel(t.durationValue, t.durationUnit)}
-                            </>
-                          )}
-                        </div>
-                      </div>
-                      <div className="tracker-actions">
-                        <button className="btn-icon" onClick={() => openTrackerEdit(t)} title="Edit">&#9998;</button>
-                        <button className="btn-icon btn-del" onClick={() => setConfirmDeleteTrackerId(t.id)} title="Delete">&times;</button>
-                      </div>
-                    </div>
-                    <div className="tracker-stats">
-                      <span className="tracker-stat"><b>{st.done}</b>{st.endless ? " done" : `/${st.total} done`}</span>
-                      <span className="tracker-stat">
-                        {st.endless ? "ongoing" : st.ended ? "ended" : st.notStarted ? "not started" : `${st.remaining} day${st.remaining === 1 ? "" : "s"} left`}
-                      </span>
-                      {st.streak > 0 && <span className="tracker-stat">&#128293; {st.streak} streak</span>}
-                      {!st.endless && (
-                        <span className="tracker-progress" title={`${st.pct}%`}>
-                          <span className="tracker-progress-fill" style={{ width: `${st.pct}%`, background: t.color }} />
-                        </span>
-                      )}
-                    </div>
-                    <TrackerHeatmap tracker={t} onToggle={toggleTrackerMark} today={today} />
-                    <button
-                      className={`tracker-today-btn${markedToday ? " done" : ""}`}
-                      onClick={() => toggleTrackerMark(t.id, today)}
-                      disabled={!canMarkToday}
-                      style={markedToday ? { background: t.color, borderColor: t.color } : undefined}
-                    >
-                      {st.notStarted ? `Starts ${fmtDay(t.startDate)}`
-                        : st.ended ? "Course ended"
-                        : markedToday ? "✓ Done today" : "Mark today done"}
-                    </button>
-                  </div>
-                );
-              })}
-              <div className="add-card tracker-add-card" onClick={openTrackerNew}>+ New tracker</div>
-            </div>
-          </div>
-        )}
-
         {/* Floating Global Search Popover */}
         {globalSearchOpen && (
           <div className="global-search-popover" onClick={(e) => e.stopPropagation()}>
