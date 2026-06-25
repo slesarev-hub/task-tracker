@@ -981,6 +981,7 @@ function TrackerHeatmap({ tracker, onToggle, today }) {
       const ds = toDay(cur);
       week.push({
         ds,
+        dayNum: cur.getDate(),
         inRange: ds >= tracker.startDate && ds <= lastStr,
         done: marks.has(ds),
         isToday: ds === today,
@@ -1029,7 +1030,9 @@ function TrackerHeatmap({ tracker, onToggle, today }) {
                     style={cell.inRange && cell.done ? { background: color } : undefined}
                     title={cell.inRange ? `${cell.ds}${cell.done ? " ✓" : ""}` : ""}
                     onClick={() => cell.inRange && onToggle(tracker.id, cell.ds)}
-                  />
+                  >
+                    {cell.dayNum}
+                  </button>
                 ))}
               </div>
             ))}
@@ -3229,36 +3232,39 @@ export default function App() {
         }
         .tracker-progress-fill { display: block; height: 100%; border-radius: 3px; transition: width 0.2s; }
         .tracker-today-btn {
-          margin-top: 12px; width: 100%; padding: 10px; border-radius: 8px;
-          background: #0d0f14; border: 1px solid #2a2d38; color: #e8eaf0;
-          font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+          margin-top: 12px; padding: 5px 12px; border-radius: 6px;
+          background: #0d0f14; border: 1px solid #2a2d38; color: #9ca3af;
+          font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
         }
-        .tracker-today-btn:hover:not(:disabled) { border-color: #3b82f6; }
-        .tracker-today-btn.done { color: #0d0f14; }
+        .tracker-today-btn:hover:not(:disabled) { border-color: #3b82f6; color: #e8eaf0; }
+        .tracker-today-btn.done { color: #0d0f14; font-weight: 600; }
         .tracker-today-btn:disabled { opacity: 0.5; cursor: default; }
         .tracker-add-card { min-height: 60px; }
 
-        /* Heatmap */
+        /* Heatmap — calendar grid with day numbers */
         .heatmap { overflow-x: auto; padding-bottom: 4px; }
         .heatmap-inner { display: flex; gap: 4px; width: max-content; }
         .heatmap-weekdays { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
         .heatmap-month-spacer { height: 14px; }
         .heatmap-weekday {
-          height: 13px; font-size: 9px; line-height: 13px; color: #6b7280;
+          height: 26px; font-size: 9px; line-height: 26px; color: #6b7280;
           padding-right: 4px; text-align: right; width: 26px;
         }
         .heatmap-body { display: flex; flex-direction: column; gap: 3px; }
         .heatmap-months { display: flex; gap: 3px; height: 14px; }
-        .heatmap-month { width: 13px; font-size: 9px; line-height: 14px; color: #6b7280; white-space: nowrap; }
+        .heatmap-month { width: 26px; font-size: 9px; line-height: 14px; color: #6b7280; white-space: nowrap; }
         .heatmap-cols { display: flex; gap: 3px; }
         .heatmap-col { display: flex; flex-direction: column; gap: 3px; }
         .heatmap-cell {
-          width: 13px; height: 13px; border-radius: 2px; padding: 0; border: none;
-          background: #21262d; cursor: pointer; transition: outline 0.1s;
+          width: 26px; height: 26px; border-radius: 3px; padding: 0;
+          border: 1px solid #2a2d38; background: #161a21; color: #8b92a0;
+          font-size: 10px; line-height: 1; display: flex; align-items: center;
+          justify-content: center; cursor: pointer; transition: outline 0.1s, background 0.15s;
         }
         .heatmap-cell:hover:not(:disabled) { outline: 1px solid #6b7280; }
-        .heatmap-cell.out { background: transparent; cursor: default; visibility: hidden; }
-        .heatmap-cell.future { background: #161820; }
+        .heatmap-cell.out { background: transparent; border-color: #1c2029; color: #3a3f4a; cursor: default; }
+        .heatmap-cell.future { background: #11141a; color: #4b5563; }
+        .heatmap-cell.done { color: #0d0f14; font-weight: 700; }
         .heatmap-cell.today { outline: 1.5px solid #e8eaf0; outline-offset: 0; }
 
         /* Tracker editor modal */
