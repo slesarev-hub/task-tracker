@@ -975,6 +975,7 @@ function TrackerHeatmap({ tracker, onToggle, today }) {
   const monthLabels = [];
   let cur = gridStart;
   let prevMonth = -1;
+  let prevYear = -1;
   while (cur <= gridEnd) {
     const week = [];
     for (let i = 0; i < 7; i++) {
@@ -990,10 +991,20 @@ function TrackerHeatmap({ tracker, onToggle, today }) {
       cur = addDays(cur, 1);
     }
     // Month label over a column when its first in-range day starts a new month.
+    // When the grid crosses into a new year (Dec → Jan), append the year so the
+    // January block is unambiguous, e.g. "Jan '27".
     const firstReal = week.find((c) => c.inRange) || week[0];
-    const mo = parseDay(firstReal.ds).getMonth();
-    monthLabels.push(mo !== prevMonth ? MONTH_ABBR[mo] : "");
+    const fd = parseDay(firstReal.ds);
+    const mo = fd.getMonth();
+    const yr = fd.getFullYear();
+    let label = "";
+    if (mo !== prevMonth) {
+      label = MONTH_ABBR[mo];
+      if (prevYear !== -1 && yr !== prevYear) label += ` '${String(yr).slice(2)}`;
+    }
+    monthLabels.push(label);
     prevMonth = mo;
+    prevYear = yr;
     weeks.push(week);
   }
   const color = tracker.color || TRACKER_COLORS[0];
